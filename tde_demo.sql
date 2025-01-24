@@ -48,7 +48,7 @@ USE master;
 GO
 IF NOT EXISTS (SELECT * 
                FROM sys.symmetric_keys 
-			   WHERE symmetric_key_id = 101)
+	       WHERE symmetric_key_id = 101)
 BEGIN
 	CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'SQL$ecurity3SQL$ecurity3';
 	PRINT 'Database Master Key Created'
@@ -61,7 +61,7 @@ GO
 
 IF NOT EXISTS (SELECT * 
                FROM sys.certificates 
-			   WHERE name = 'TDETestCert8675309')
+	       WHERE name = 'TDETestCert8675309')
 BEGIN
 	CREATE CERTIFICATE TDETestCert8675309 WITH SUBJECT = 'Certificate for TDE - tdedb'
 	PRINT 'Certificate TDETestCert8675309 Created'
