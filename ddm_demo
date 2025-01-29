@@ -1,0 +1,281 @@
+/*
+THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, 
+EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS 
+FOR A PARTICULAR PURPOSE. 
+
+We grant You a nonexclusive, royalty-free right to use and modify the Sample Code and to reproduce and distribute 
+the object code form of the Sample Code, provided that You agree: ?
+(i) to not use Our name, logo, or trademarks to market Your software product in which the Sample Code is embedded; ?
+(ii) to include a valid copyright notice on Your software product in which the Sample Code is embedded; and ?
+(iii) to indemnify, hold harmless, and defend Us and Our suppliers from and against any claims or lawsuits, including attorneys’ fees, 
+that arise or result from the use or distribution of the Sample Code. ?
+Please note: None of the conditions outlined in the disclaimer above will supersede the terms and conditions 
+contained within the Premier Customer Services Description. ?
+*/
+
+/*
+create a test database on a test sql server to enable tde
+*/
+USE master
+GO
+DROP DATABASE IF EXISTS ddmdb0329223;
+GO
+CREATE DATABASE ddmdb0329223;
+GO
+
+USE ddmdb0329223
+GO
+
+/*
+schema to contain user tables
+*/
+CREATE SCHEMA [Data];
+GO
+
+/*
+table with masked columns
+*/
+CREATE TABLE [Data].Membership (
+    MemberID INT IDENTITY(1, 1) NOT NULL PRIMARY KEY CLUSTERED,
+    FirstName VARCHAR(100) MASKED WITH (FUNCTION = 'partial(1, "xxxxx", 1)') NULL,
+    LastName VARCHAR(100) NOT NULL,
+    Phone VARCHAR(12) MASKED WITH (FUNCTION = 'default()') NULL,
+    Email VARCHAR(100) MASKED WITH (FUNCTION = 'email()') NOT NULL,
+    DiscountCode SMALLINT MASKED WITH (FUNCTION = 'random(1, 100)') NULL
+);
+
+/*
+inserting sample data
+*/
+INSERT INTO [Data].Membership (FirstName, LastName, Phone, Email, DiscountCode)
+VALUES
+('Roberto', 'Tamburello', '555.123.4567', 'RTamburello@contoso.com', 10),
+('Janice', 'Galvin', '555.123.4568', 'JGalvin@contoso.com.co', 5),
+('Shakti', 'Menon', '555.123.4570', 'SMenon@contoso.net', 50),
+('Zheng', 'Mu', '555.123.4569', 'ZMu@contoso.net', 40);
+GO
+
+/*
+A new user is created and granted the SELECT permission on the schema where the table resides. 
+Queries executed as the MaskingTestUser view masked data.
+*/
+CREATE USER MaskingTestUser WITHOUT LOGIN;
+
+GRANT SELECT ON SCHEMA::Data TO MaskingTestUser;
+ 
+-- impersonate for testing:
+EXECUTE AS USER = 'MaskingTestUser';
+
+SELECT * FROM Data.Membership;
+
+REVERT;
+GO
+
+/*
+The result demonstrates the masks by changing the data from:
+
+1 Roberto Tamburello 555.123.4567 RTamburello@contoso.com 10
+
+into:
+
+1 Rxxxxxo Tamburello xxxx RXXX@XXXX.com 91
+
+where the number in DiscountCode is random for every query result.
+*/
+
+/*
+Use the ALTER TABLE statement to add a mask to an existing column in the table, or to edit the mask on that column.
+The following example adds a masking function to the LastName column:
+*/
+ALTER TABLE [Data].Membership
+ALTER COLUMN LastName ADD MASKED WITH (FUNCTION = 'partial(2,"xxxx",0)');
+GO
+
+/*
+impersonate for testing:
+*/
+EXECUTE AS USER = 'MaskingTestUser';
+
+SELECT * FROM Data.Membership;
+
+REVERT;
+GO
+
+/*
+The following example changes a masking function on the LastName column
+*/
+ALTER TABLE [Data].Membership
+ALTER COLUMN LastName VARCHAR(100) MASKED WITH (FUNCTION = 'default()');
+GO
+
+/*
+impersonate for testing:
+*/
+EXECUTE AS USER = 'MaskingTestUser';
+
+SELECT * FROM Data.Membership;
+
+REVERT;
+GO
+
+/*
+granting the UNMASK permission allows MaskingTestUser to see the data unmasked.
+*/
+GRANT UNMASK TO MaskingTestUser;
+
+EXECUTE AS USER = 'MaskingTestUser';
+
+SELECT * 
+FROM [Data].Membership;
+
+REVERT;
+  
+-- removing the UNMASK permission
+REVOKE UNMASK TO MaskingTestUser;
+GO
+
+/*
+To drop the mask on the LastName column
+*/
+ALTER TABLE [Data].Membership
+ALTER COLUMN LastName DROP MASKED;
+GO
+
+/*
+****************************************************
+granular permissions available in (SQL Server 2022+)
+
+scroll down to skip and cleanup the demo database
+****************************************************
+*/
+
+DROP TABLE IF EXISTS [Data].Membership;
+GO
+
+--create table with masked columns
+CREATE TABLE [Data].Membership (
+    MemberID INT IDENTITY(1, 1) NOT NULL PRIMARY KEY CLUSTERED,
+    FirstName VARCHAR(100) MASKED WITH (FUNCTION = 'partial(1, "xxxxx", 1)') NULL,
+    LastName VARCHAR(100) NOT NULL,
+    Phone VARCHAR(12) MASKED WITH (FUNCTION = 'default()') NULL,
+    Email VARCHAR(100) MASKED WITH (FUNCTION = 'email()') NOT NULL,
+    DiscountCode SMALLINT MASKED WITH (FUNCTION = 'random(1, 100)') NULL,
+    BirthDay DATETIME MASKED WITH (FUNCTION = 'default()') NULL
+);
+GO
+
+--insert sample data
+INSERT INTO Data.Membership (FirstName, LastName, Phone, Email, DiscountCode, BirthDay)
+VALUES
+('Roberto', 'Tamburello', '555.123.4567', 'RTamburello@contoso.com', 10, '1985-01-25 03:25:05'),
+('Janice', 'Galvin', '555.123.4568', 'JGalvin@contoso.com.co', 5, '1990-05-14 11:30:00'),
+('Shakti', 'Menon', '555.123.4570', 'SMenon@contoso.net', 50, '2004-02-29 14:20:10'),
+('Zheng', 'Mu', '555.123.4569', 'ZMu@contoso.net', 40, '1990-03-01 06:00:00');
+GO
+
+--create schema to contain service tables
+CREATE SCHEMA [Service];
+GO
+
+--create service table with masked columns
+CREATE TABLE [Service].Feedback (
+    MemberID INT IDENTITY(1, 1) NOT NULL PRIMARY KEY CLUSTERED,
+    Feedback VARCHAR(100) MASKED WITH (FUNCTION = 'default()') NULL,
+    Rating INT MASKED WITH (FUNCTION = 'default()'),
+    Received_On DATETIME);
+GO
+
+--insert sample data
+INSERT INTO [Service].Feedback(Feedback, Rating, Received_On)
+VALUES
+('Good', 4, '2022-01-25 11:25:05'),
+('Excellent', 5, '2021-12-22 08:10:07'),
+('Average', 3, '2021-09-15 09:00:00');
+GO
+
+--create different users in the database
+CREATE USER ServiceAttendant WITHOUT LOGIN;
+CREATE USER ServiceLead WITHOUT LOGIN;
+CREATE USER ServiceManager WITHOUT LOGIN;
+CREATE USER ServiceHead WITHOUT LOGIN;
+GO
+
+--grant read permissions to the users in the database
+ALTER ROLE db_datareader ADD MEMBER ServiceAttendant;
+ALTER ROLE db_datareader ADD MEMBER ServiceLead;
+ALTER ROLE db_datareader ADD MEMBER ServiceManager;
+ALTER ROLE db_datareader ADD MEMBER ServiceHead;
+GO
+
+/*
+grant different UNMASK permissions to users
+*/
+--Grant column level UNMASK permission to ServiceAttendant
+GRANT UNMASK ON [Data].Membership(FirstName) TO ServiceAttendant;
+-- Grant table level UNMASK permission to ServiceLead
+GRANT UNMASK ON [Data].Membership TO ServiceLead;
+-- Grant schema level UNMASK permission to ServiceManager
+GRANT UNMASK ON SCHEMA::Data TO ServiceManager;
+GRANT UNMASK ON SCHEMA::Service TO ServiceManager;
+--Grant database level UNMASK permission to ServiceHead;
+GRANT UNMASK TO ServiceHead;
+GO
+
+--query the data under the context of user ServiceAttendant
+EXECUTE AS USER = 'ServiceAttendant';
+
+SELECT MemberID, FirstName, LastName, Phone, Email, BirthDay
+FROM [Data].Membership;
+
+SELECT MemberID, Feedback, Rating
+FROM [Service].Feedback;
+
+REVERT;
+GO
+
+--query the data under the context of user ServiceManager
+EXECUTE AS USER = 'ServiceManager';
+
+SELECT MemberID, FirstName, LastName, Phone, Email, BirthDay
+FROM [Data].Membership;
+
+SELECT MemberID, Feedback, Rating
+FROM [Service].Feedback;
+
+REVERT;
+GO
+
+--query the data under the context of user ServiceHead
+EXECUTE AS USER = 'ServiceHead';
+
+SELECT MemberID, FirstName, LastName, Phone, Email, BirthDay
+FROM [Data].Membership;
+
+SELECT MemberID, Feedback, Rating
+FROM [Service].Feedback;
+
+REVERT;
+GO
+
+--to revoke UNMASK permissions, use the following T-SQL statements
+REVOKE UNMASK ON Data.Membership(FirstName) FROM ServiceAttendant;
+REVOKE UNMASK ON Data.Membership FROM ServiceLead;
+REVOKE UNMASK ON SCHEMA::Data FROM ServiceManager;
+REVOKE UNMASK ON SCHEMA::Service FROM ServiceManager;
+REVOKE UNMASK FROM ServiceHead;
+GO
+
+/*
+****************************************************
+granular permissions available in (SQL Server 2022+)
+****************************************************
+*/
+
+
+/*
+clean up
+*/
+USE master
+GO
+DROP DATABASE IF EXISTS ddmdb0329223;
+GO
