@@ -144,7 +144,7 @@ GO
 --sales manager can insert rows for all sales
 EXECUTE AS USER = 'SalesManager' 
 INSERT INTO dbo.CUSTOMER VALUES
-('Stephen Jiang', 'Stephen.Jiang@adworks.com', 'Sales2', GETDATE())
+('Tully McTully', 'capt.t@adworks.com', 'Sales2', GETDATE())
 REVERT
 GO
 
@@ -153,7 +153,7 @@ GO
 --and vise versa
 EXECUTE AS USER = 'Sales1' 
 INSERT INTO dbo.CUSTOMER VALUES
-('Stephen Jiang', 'Stephen.Jiang@adworks.com', 'Sales2', GETDATE())
+('Tully McTully', 'capt.t@adworks.com', 'Sales2', GETDATE())
 REVERT
 GO
 
