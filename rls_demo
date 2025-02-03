@@ -20,9 +20,9 @@ DROP DATABASE IF EXISTS RLSDemo0329223
 GO
 CREATE DATABASE RLSDemo0329223
 GO
+
 USE RLSDemo0329223
 GO
-
 CREATE SCHEMA rls_security
 GO
 
@@ -44,13 +44,19 @@ GO
 
 --Grant SELECT permissions
 GRANT SELECT, 
-      UPDATE ON dbo.Customer 
+      UPDATE,
+	  INSERT,
+	  DELETE ON dbo.Customer 
 	TO SalesManager, Sales1, Sales2
 GO
 
 --insert data into customer table
 --Sales1 = 3 customers
 --Sales2 = 4 customers
+DELETE FROM dbo.Customer
+GO
+
+EXECUTE AS USER = 'SalesManager'
 INSERT INTO dbo.CUSTOMER VALUES
 ('Stephen Jiang', 'Stephen.Jiang@adworks.com', 'Sales1', GETDATE()),
 ('Michael Blythe', 'Michael@contoso.com', 'Sales1', GETDATE()),
@@ -59,12 +65,13 @@ INSERT INTO dbo.CUSTOMER VALUES
 ('Shu Ito', 'Shu@BlueYonder.com', 'Sales2', GETDATE()),
 ('Sahana Reiter', 'Sahana@CohoVines.com', 'Sales2', GETDATE()),
 ('Syed Abbas','Syed@AlpineSki.com', 'Sales2', GETDATE())
+REVERT
 GO
 
 --test row-level-security
 --execute as SalesManager, Sales1, and Sales2
 --no RLS configured yet, all users will able to read all records
-EXECUTE AS USER = 'SalesManager' --change to Sales1 & Sales2 and execute block as each user
+EXECUTE AS USER = 'SalesManager'
 SELECT CustomerName, 
        CustomerEmail, 
 	   SalesPersonName
@@ -72,46 +79,136 @@ FROM dbo.Customer
 REVERT
 GO
 
---create a tvf for the row-level filter
+--no RLS configured yet, all users will able to read all records
+EXECUTE AS USER = 'Sales1'
+SELECT CustomerName, 
+       CustomerEmail, 
+	   SalesPersonName
+FROM dbo.Customer
+REVERT
+GO
+
+--no RLS configured yet, all users will able to read all records
+EXECUTE AS USER = 'Sales2'
+SELECT CustomerName, 
+       CustomerEmail, 
+	   SalesPersonName
+FROM dbo.Customer
+REVERT
+GO
+
+--create a tvf for the row-level filter for sales personal
 CREATE FUNCTION rls_security.fn_RowLevelSecurity (@FilterName sysname)
 RETURNS TABLE
 WITH SCHEMABINDING
 AS
 	RETURN SELECT 1 as fn_SecureCustomerData
-	WHERE @FilterName = user_name() 
+	WHERE @FilterName = user_name()
 		OR user_name() = 'SalesManager'
 GO
 
 --apply the row-level filter with a security policy
 CREATE SECURITY POLICY dbo.FilterCustomer
-	ADD FILTER PREDICATE rls_security.fn_RowLevelSecurity(SalesPersonName)
-	ON dbo.Customer
+	ADD FILTER PREDICATE rls_security.fn_RowLevelSecurity(SalesPersonName) ON dbo.Customer,
+	--prevent users from inserting \ updating rows to values that violate the predicate
+	ADD BLOCK PREDICATE rls_security.fn_RowLevelSecurity(SalesPersonName) ON dbo.Customer AFTER UPDATE,
+	ADD BLOCK PREDICATE rls_security.fn_RowLevelSecurity(SalesPersonName) ON dbo.Customer AFTER INSERT
 	WITH (State = ON)
 GO
 
 --test row-level security
---execute as SalesManager, Sales1, and Sales2
---Sales1 and Sales2 should only see their customers.
---SalesManager can still see all records.
-EXECUTE AS USER = 'SalesManager' --change to Sales1 & Sales2 and execute block as each user
+
+--SalesManager can see all records.
+EXECUTE AS USER = 'SalesManager'
 SELECT CustID, CustomerEmail, SalesPersonName
 FROM dbo.Customer
 REVERT
 GO
 
---test row-level security
---execute as SalesManager, Sales1, and Sales2
---check the number of records affected
---SalesManager should be able to update all records
---Sales1 & Sales2 will only update 
---records where they are the SalesPersonName
+--Sales1 can only see Sales1 records.
+EXECUTE AS USER = 'Sales1'
+SELECT CustID, CustomerEmail, SalesPersonName
+FROM dbo.Customer
+REVERT
+GO
 
---as SalesManager, 7 rows will be updated
---as Sales1, 3 rows will be updated
---as Sales2, 4 rows will be udpated
-EXECUTE AS USER = 'SalesManager' --change to Sales1 & Sales2 and execute block as each user
+--Sales2 can only see Sales2 records.
+EXECUTE AS USER = 'Sales2'
+SELECT CustID, CustomerEmail, SalesPersonName
+FROM dbo.Customer
+REVERT
+GO
+
+--AFTER INSERT predicate
+--prevent users from inserting rows to values that violate the predicate
+--sales manager can insert rows for all sales
+EXECUTE AS USER = 'SalesManager' 
+INSERT INTO dbo.CUSTOMER VALUES
+('Stephen Jiang', 'Stephen.Jiang@adworks.com', 'Sales2', GETDATE())
+REVERT
+GO
+
+--AFTER INSERT predicate
+--Sales1 can't insert records for Sales2 
+--and vise versa
+EXECUTE AS USER = 'Sales1' 
+INSERT INTO dbo.CUSTOMER VALUES
+('Stephen Jiang', 'Stephen.Jiang@adworks.com', 'Sales2', GETDATE())
+REVERT
+GO
+
+--AFTER UPDATE predicate
+--prevent users from updating rows to values that violate the predicate
+EXECUTE AS USER = 'Sales1' 
 UPDATE dbo.CUSTOMER
-SET LastUpdated = GETDATE()
+SET SalesPersonName = 'Sales2'
+WHERE SalesPersonName = 'Sales1' --does not violate predicate, update would violate predicate
+REVERT
+GO
+
+--testing the block predicates
+--apply the row-level filter with a security policy
+DROP SECURITY POLICY dbo.FilterCustomer
+GO
+
+CREATE SECURITY POLICY dbo.FilterCustomer
+	--prevent users from updating rows that currently violate the predicate
+	ADD BLOCK PREDICATE rls_security.fn_RowLevelSecurity(SalesPersonName) ON dbo.Customer BEFORE UPDATE,
+	--block delete operations
+	ADD BLOCK PREDICATE rls_security.fn_RowLevelSecurity(SalesPersonName) ON dbo.Customer BEFORE DELETE
+	WITH (State = ON)
+GO
+
+--with no filter predicates, users can see all rows
+--Sales1 can see all rows
+EXECUTE AS USER = 'Sales1'
+SELECT CustID, CustomerEmail, SalesPersonName
+FROM dbo.Customer
+REVERT
+GO
+
+--Sales2 can see all rows
+EXECUTE AS USER = 'Sales2'
+SELECT CustID, CustomerEmail, SalesPersonName
+FROM dbo.Customer
+REVERT
+GO
+
+--BEFORE UPDATE predicate prevents users from updating rows that currently violate the predicate
+--Sales1 can't 'steal' Sales2 customers
+EXECUTE AS USER = 'Sales2' 
+UPDATE dbo.CUSTOMER
+SET SalesPersonName = 'Sales2'
+WHERE SalesPersonName = 'Sales1' --currently violates predicate, update would violate predicate
+REVERT
+GO
+
+--BEFORE DELETE predicate in security predicate prevents deletions
+--Sales1 can't delete Sales2 customers
+--see the '0 rows affected' message
+EXECUTE AS USER = 'Sales1' 
+DELETE FROM dbo.CUSTOMER
+WHERE SalesPersonName = 'Sales2'
 REVERT
 GO
 
