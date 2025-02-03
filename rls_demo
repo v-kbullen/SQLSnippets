@@ -1,0 +1,117 @@
+/*
+THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, 
+EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS 
+FOR A PARTICULAR PURPOSE. 
+
+We grant You a nonexclusive, royalty-free right to use and modify the Sample Code and to reproduce and distribute 
+the object code form of the Sample Code, provided that You agree: ?
+(i) to not use Our name, logo, or trademarks to market Your software product in which the Sample Code is embedded; ?
+(ii) to include a valid copyright notice on Your software product in which the Sample Code is embedded; and ?
+(iii) to indemnify, hold harmless, and defend Us and Our suppliers from and against any claims or lawsuits, including attorneys’ fees, 
+that arise or result from the use or distribution of the Sample Code. ?
+Please note: None of the conditions outlined in the disclaimer above will supersede the terms and conditions 
+contained within the Premier Customer Services Description. ?
+*/
+
+USE MASTER
+GO
+
+DROP DATABASE IF EXISTS RLSDemo0329223
+GO
+CREATE DATABASE RLSDemo0329223
+GO
+USE RLSDemo0329223
+GO
+
+--create self-contained database users without logins
+CREATE USER SalesManager WITHOUT LOGIN
+CREATE USER Sales1 WITHOUT LOGIN
+CREATE USER Sales2 WITHOUT LOGIN
+GO
+
+--Create Customer Table
+CREATE TABLE dbo.Customer
+(CustID tinyint IDENTITY,
+ CustomerName varchar(30),
+ CustomerEmail varchar(30),
+ SalesPersonName varchar(35),
+ LastUpdated DATETIME
+)
+GO
+
+--Grant SELECT permissions
+GRANT SELECT, 
+      UPDATE ON dbo.Customer 
+	TO SalesManager, Sales1, Sales2
+GO
+
+--insert data into customer table
+--Sales1 = 3 customers
+--Sales2 = 4 customers
+INSERT INTO dbo.CUSTOMER VALUES
+('Stephen Jiang', 'Stephen.Jiang@adworks.com', 'Sales1', GETDATE()),
+('Michael Blythe', 'Michael@contoso.com', 'Sales1', GETDATE()),
+('Linda Mitchell', 'Linda@VolcanoCoffee.org', 'Sales1', GETDATE()),
+('Garret Vargas', 'Garret@WorldWideImporters.com', 'Sales2', GETDATE()),
+('Shu Ito', 'Shu@BlueYonder.com', 'Sales2', GETDATE()),
+('Sahana Reiter', 'Sahana@CohoVines.com', 'Sales2', GETDATE()),
+('Syed Abbas','Syed@AlpineSki.com', 'Sales2', GETDATE())
+GO
+
+--test row-level-security
+--execute as SalesManager, Sales1, and Sales2
+--no RLS configured yet, all users will able to read all records
+EXECUTE AS USER = 'SalesManager' --change to Sales1 & Sales2 and execute block as each user
+SELECT CustomerName, CustomerEmail, SalesPersonName
+FROM dbo.Customer
+REVERT
+GO
+
+--use a Function to create the row-level filter
+CREATE FUNCTION fn_RowLevelSecurity
+(@FilterName sysname)
+RETURNS TABLE
+WITH SCHEMABINDING
+AS
+RETURN SELECT 1 as fn_SecureCustomerData
+WHERE @FilterName = user_name() or user_name() = 'SalesManager'
+GO
+
+--apply the row-level filter with a security policy
+CREATE SECURITY POLICY FilterCustomer
+ADD FILTER PREDICATE dbo.fn_RowLevelSecurity(SalesPersonName)
+ON dbo.Customer
+WITH (State = ON)
+GO
+
+--test row-level security
+--execute as SalesManager, Sales1, and Sales2
+--Sales1 and Sales2 should only see their customers.
+--SalesManager can still see all records.
+EXECUTE AS USER = 'Sales2' --change to Sales1 & Sales2 and execute block as each user
+SELECT CustID, CustomerEmail, SalesPersonName
+FROM dbo.Customer
+REVERT
+GO
+
+--test row-level security
+--execute as SalesManager, Sales1, and Sales2
+--check the number of records affected
+--SalesManager should be able to update all records
+--Sales1 & Sales2 will only update 
+--records where they are the SalesPersonName
+
+--as SalesManager, 7 rows will be updated
+--as Sales1, 3 rows will be updated
+--as Sales2, 4 rows will be udpated
+EXECUTE AS USER = 'Sales2' --change to Sales1 & Sales2 and execute block as each user
+UPDATE dbo.CUSTOMER
+SET LastUpdated = GETDATE()
+REVERT
+GO
+
+--Clean Up
+USE MASTER
+GO
+DROP DATABASE IF EXISTS RLSDemo0329223
+GO
