@@ -23,6 +23,9 @@ GO
 USE RLSDemo0329223
 GO
 
+CREATE SCHEMA rls_security
+GO
+
 --create self-contained database users without logins
 CREATE USER SalesManager WITHOUT LOGIN
 CREATE USER Sales1 WITHOUT LOGIN
@@ -62,33 +65,35 @@ GO
 --execute as SalesManager, Sales1, and Sales2
 --no RLS configured yet, all users will able to read all records
 EXECUTE AS USER = 'SalesManager' --change to Sales1 & Sales2 and execute block as each user
-SELECT CustomerName, CustomerEmail, SalesPersonName
+SELECT CustomerName, 
+       CustomerEmail, 
+	   SalesPersonName
 FROM dbo.Customer
 REVERT
 GO
 
---use a Function to create the row-level filter
-CREATE FUNCTION fn_RowLevelSecurity
-(@FilterName sysname)
+--create a tvf for the row-level filter
+CREATE FUNCTION rls_security.fn_RowLevelSecurity (@FilterName sysname)
 RETURNS TABLE
 WITH SCHEMABINDING
 AS
-RETURN SELECT 1 as fn_SecureCustomerData
-WHERE @FilterName = user_name() or user_name() = 'SalesManager'
+	RETURN SELECT 1 as fn_SecureCustomerData
+	WHERE @FilterName = user_name() 
+		OR user_name() = 'SalesManager'
 GO
 
 --apply the row-level filter with a security policy
-CREATE SECURITY POLICY FilterCustomer
-ADD FILTER PREDICATE dbo.fn_RowLevelSecurity(SalesPersonName)
-ON dbo.Customer
-WITH (State = ON)
+CREATE SECURITY POLICY dbo.FilterCustomer
+	ADD FILTER PREDICATE rls_security.fn_RowLevelSecurity(SalesPersonName)
+	ON dbo.Customer
+	WITH (State = ON)
 GO
 
 --test row-level security
 --execute as SalesManager, Sales1, and Sales2
 --Sales1 and Sales2 should only see their customers.
 --SalesManager can still see all records.
-EXECUTE AS USER = 'Sales2' --change to Sales1 & Sales2 and execute block as each user
+EXECUTE AS USER = 'SalesManager' --change to Sales1 & Sales2 and execute block as each user
 SELECT CustID, CustomerEmail, SalesPersonName
 FROM dbo.Customer
 REVERT
@@ -104,7 +109,7 @@ GO
 --as SalesManager, 7 rows will be updated
 --as Sales1, 3 rows will be updated
 --as Sales2, 4 rows will be udpated
-EXECUTE AS USER = 'Sales2' --change to Sales1 & Sales2 and execute block as each user
+EXECUTE AS USER = 'SalesManager' --change to Sales1 & Sales2 and execute block as each user
 UPDATE dbo.CUSTOMER
 SET LastUpdated = GETDATE()
 REVERT
