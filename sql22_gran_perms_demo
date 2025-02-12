@@ -1,0 +1,135 @@
+-- use the master database
+USE [master]
+GO
+
+-- drop test logins if exist
+IF EXISTS (SELECT * FROM master.sys.server_principals WHERE name = 'SQL2022GranPermsLoginManager')
+BEGIN
+    DROP LOGIN SQL2022GranPermsLoginManager;
+END
+
+IF EXISTS (SELECT * FROM master.sys.server_principals WHERE name = 'SQL2022GranPermsExistingLogin')
+BEGIN
+    DROP LOGIN SQL2022GranPermsExistingLogin;
+END
+GO
+
+--create new logins, an "existing" login, and the new loginmanager login
+CREATE LOGIN [SQL2022GranPermsExistingLogin] WITH PASSWORD=N'MySecurePassword99!!', DEFAULT_DATABASE=[master], CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF
+CREATE LOGIN [SQL2022GranPermsLoginManager] WITH PASSWORD=N'MySecurePassword99!!', DEFAULT_DATABASE=[master], CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF
+GO
+ALTER SERVER ROLE [##MS_LoginManager##] ADD MEMBER [SQL2022GranPermsLoginManager]
+GO
+
+--#######################################################################
+
+--In SSMS, connect with SQL2022GranPermsLoginManager and run:
+--create a new login
+USE [master]
+CREATE LOGIN [SQL2022GranPermsLoginManagerNewLogin] WITH PASSWORD=N'MySecurePassword99!!', DEFAULT_DATABASE=[master], CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF
+GO
+--it will succeed and the new login will be created
+
+--alter an existing login
+ALTER SERVER ROLE [sysadmin] ADD MEMBER [SQL2022GranPermsExistingLogin]
+GO
+--it will fail with the error:
+--Msg 15151, Level 16, State 1, Line 1
+--Cannot alter the server role 'sysadmin', because it does not exist or you do not have permission.
+
+--Extended Events--
+
+--create a test xe session
+IF EXISTS (SELECT * FROM sys.server_event_sessions WHERE name = 'SQL2022GranPermsXESession')
+BEGIN
+    DROP EVENT SESSION SQL2022GranPermsXESession ON SERVER;
+END
+GO
+
+CREATE EVENT SESSION [SQL2022GranPermsXESession] ON SERVER 
+ADD EVENT sqlserver.login
+ADD TARGET package0.ring_buffer(SET max_memory=(8192))
+WITH (STARTUP_STATE=ON)
+GO
+
+-- create SQL2022GranPermsXEStarter login to start xe sessions 
+IF EXISTS (SELECT * FROM master.sys.server_principals WHERE name = 'SQL2022GranPermsXEStarter')
+BEGIN
+    DROP LOGIN SQL2022GranPermsXEStarter;
+END
+CREATE LOGIN [SQL2022GranPermsXEStarter] WITH PASSWORD=N'MySecurePassword99!!', DEFAULT_DATABASE=[master], CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF
+GO
+
+-- create SQL2022GranPermsXEStopper login to stop xe sessions 
+IF EXISTS (SELECT * FROM master.sys.server_principals WHERE name = 'SQL2022GranPermsXEStopper')
+BEGIN
+    DROP LOGIN SQL2022GranPermsXEStopper;
+END
+CREATE LOGIN [SQL2022GranPermsXEStopper] WITH PASSWORD=N'MySecurePassword99!!', DEFAULT_DATABASE=[master], CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF
+GO
+
+--grant permissions to enable an existing session
+use [master]
+GO
+GRANT ALTER ANY EVENT SESSION ENABLE TO [SQL2022GranPermsXEStarter]
+GRANT ALTER ANY EVENT SESSION DISABLE TO [SQL2022GranPermsXEStopper]
+GO
+
+--#######################################################################
+
+--connect as SQL2022GranPermsXEStarter and start the session
+ALTER EVENT SESSION [SQL2022GranPermsXESession] ON SERVER STATE = START;
+GO
+--the session will start successfully
+
+--stop the session
+ALTER EVENT SESSION [SQL2022GranPermsXESession] ON SERVER STATE = STOP;
+GO
+--it will fail with the error
+--Msg 15151, Level 16, State 19, Line 2
+--Cannot alter the event session 'SQL2022GranPermsXESession', because it does not exist or you do not have permission.
+
+--#######################################################################
+
+--connect as SQL2022GranPermsXEStopper and stop the session
+ALTER EVENT SESSION [SQL2022GranPermsXESession] ON SERVER STATE = STOP;
+GO
+--the session will stop successfully
+
+--start the session
+ALTER EVENT SESSION [SQL2022GranPermsXESession] ON SERVER STATE = START;
+GO
+--it will fail with the error
+--Msg 15151, Level 16, State 19, Line 2
+--Cannot alter the event session 'SQL2022GranPermsXESession', because it does not exist or you do not have permission.
+
+
+--cleanup
+--warning - you may need to kill any open sessions before dropping the login
+IF EXISTS (SELECT * FROM master.sys.server_principals WHERE name = 'SQL2022GranPermsLoginManager')
+BEGIN
+    DROP LOGIN SQL2022GranPermsLoginManager;
+END
+
+IF EXISTS (SELECT * FROM master.sys.server_principals WHERE name = 'SQL2022GranPermsExistingLogin')
+BEGIN
+    DROP LOGIN SQL2022GranPermsExistingLogin;
+END
+GO
+
+IF EXISTS (SELECT * FROM master.sys.server_principals WHERE name = 'SQL2022GranPermsXEStopper')
+BEGIN
+    DROP LOGIN SQL2022GranPermsXEStopper;
+END
+
+IF EXISTS (SELECT * FROM master.sys.server_principals WHERE name = 'SQL2022GranPermsXEStopper')
+BEGIN
+    DROP LOGIN SQL2022GranPermsXEStopper;
+END
+
+IF EXISTS (SELECT * FROM sys.server_event_sessions WHERE name = 'SQL2022GranPermsXESession')
+BEGIN
+    DROP EVENT SESSION SQL2022GranPermsXESession ON SERVER;
+END
+GO
+
