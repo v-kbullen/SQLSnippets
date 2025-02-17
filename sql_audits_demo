@@ -1,0 +1,132 @@
+/*
+THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, 
+EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS 
+FOR A PARTICULAR PURPOSE. 
+
+We grant You a nonexclusive, royalty-free right to use and modify the Sample Code and to reproduce and distribute 
+the object code form of the Sample Code, provided that You agree: ?
+(i) to not use Our name, logo, or trademarks to market Your software product in which the Sample Code is embedded; ?
+(ii) to include a valid copyright notice on Your software product in which the Sample Code is embedded; and ?
+(iii) to indemnify, hold harmless, and defend Us and Our suppliers from and against any claims or lawsuits, including attorneys’ fees, 
+that arise or result from the use or distribution of the Sample Code. ?
+Please note: None of the conditions outlined in the disclaimer above will supersede the terms and conditions 
+contained within the Premier Customer Services Description. ?
+*/
+
+/*
+To Do:
+ - create a directory for the audit log files
+ - and update line 61
+*/
+
+USE master;
+GO
+
+-- drop the existing database audit if it exists
+IF EXISTS (SELECT * FROM sys.database_audit_specifications WHERE name = 'MyDatabaseAuditSpec0329223')
+BEGIN
+    ALTER DATABASE AUDIT SPECIFICATION MyDatabaseAuditSpec0329223
+    WITH (STATE = OFF);
+    
+    DROP DATABASE AUDIT SPECIFICATION MyDatabaseAuditSpec0329223;
+END
+GO
+
+-- drop the existing server audit if it exists
+IF EXISTS (SELECT * FROM sys.server_audit_specifications WHERE name = 'MyServerAuditSpec0329223')
+BEGIN
+    ALTER SERVER AUDIT SPECIFICATION MyServerAuditSpec0329223
+    WITH (STATE = OFF);
+    
+    DROP SERVER AUDIT SPECIFICATION MyServerAuditSpec0329223;
+END
+GO
+
+-- drop the existing audit if it exists
+IF EXISTS (SELECT * FROM sys.server_audits WHERE name = 'MyServerAudit0329223')
+BEGIN
+    ALTER SERVER AUDIT MyServerAudit0329223
+    WITH (STATE = OFF);
+    
+    DROP SERVER AUDIT MyServerAudit0329223;
+END
+GO
+
+--drop the user database if exists
+DROP DATABASE IF EXISTS audit0329223;
+GO
+
+-- Create the audit
+CREATE SERVER AUDIT MyServerAudit0329223
+TO FILE (FILEPATH = 'C:\AuditLogs\', MAXSIZE = 10 MB, MAX_ROLLOVER_FILES = 5);
+GO
+
+-- Create the server audit specification
+CREATE SERVER AUDIT SPECIFICATION MyServerAuditSpec0329223
+FOR SERVER AUDIT MyServerAudit0329223
+ADD (FAILED_LOGIN_GROUP),
+ADD (SUCCESSFUL_LOGIN_GROUP),
+ADD (SERVER_ROLE_MEMBER_CHANGE_GROUP),
+ADD (DATABASE_CHANGE_GROUP);
+GO
+
+-- enable the server audit
+ALTER SERVER AUDIT MyServerAudit0329223
+WITH (STATE = ON);
+GO
+
+-- enable the server audit specification
+ALTER SERVER AUDIT SPECIFICATION MyServerAuditSpec0329223
+WITH (STATE = ON);
+GO
+
+-- create the database audit specification
+CREATE DATABASE audit0329223;
+GO
+
+USE audit0329223;
+GO
+
+-- Create the database audit specification
+CREATE DATABASE AUDIT SPECIFICATION MyDatabaseAuditSpec0329223
+FOR SERVER AUDIT MyServerAudit0329223
+ADD (SELECT ON DATABASE::[audit0329223] BY [public]),
+ADD (INSERT ON DATABASE::[audit0329223] BY [public]),
+ADD (SCHEMA_OBJECT_CHANGE_GROUP),
+ADD (DATABASE_PRINCIPAL_CHANGE_GROUP);
+GO
+
+-- enable the database audit specification
+ALTER DATABASE AUDIT SPECIFICATION MyDatabaseAuditSpec0329223
+WITH (STATE = ON);
+GO
+
+--create a database user
+CREATE USER TestUser WITHOUT LOGIN;
+GO
+
+-- insert data into the database
+CREATE TABLE dbo.Customer
+(CustID tinyint IDENTITY,
+ CustomerName varchar(30),
+ CustomerEmail varchar(30),
+ SalesPersonName varchar(5))
+GO
+
+INSERT INTO dbo.CUSTOMER VALUES
+('Stephen Jiang', 'Stephen.Jiang@adworks.com', 'Jack'),
+('Michael Blythe', 'Michael@contoso.com', 'Jack'),
+('Linda Mitchell', 'Linda@VolcanoCoffee.org', 'Jack'),
+('Jilian Carson', 'JilianC@Northwind.net', 'Jack'),
+('Garret Vargas', 'Garret@WorldWideImporters.com', 'Diane'),
+('Shu Ito', 'Shu@BlueYonder.com', 'Diane'),
+('Sahana Reiter', 'Sahana@CohoVines.com', 'Diane'),
+('Syed Abbas','Syed@AlpineSki.com', 'Diane')
+GO
+
+-- read the audit files
+SELECT *
+FROM sys.fn_get_audit_file('C:\AuditLogs\*.sqlaudit', DEFAULT, DEFAULT)
+WHERE server_principal_name <> 'NT AUTHORITY\SYSTEM'
+	AND action_id IN ('AUSC','CR','IN') --for demo purposes, filter the activity in the script
+GO
