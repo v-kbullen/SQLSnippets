@@ -1,0 +1,67 @@
+USE AdventureWorks2022;
+GO
+
+--- Execute the Statement in each of the isolation levels and notice the locking behavior
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+GO
+BEGIN TRANSACTION
+SELECT Name 
+FROM Production.Product
+WHERE Name between 'G' and 'Heb' 
+--- 9 Records
+--- Check the Locks 
+select resource_type, resource_description, resource_associated_entity_id, request_mode
+, request_type, request_status, request_session_id
+from sys.dm_tran_locks
+where request_session_id = @@spid
+
+-- Commit
+
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ
+go
+
+BEGIN TRANSACTION
+SELECT Name 
+FROM Production.Product
+WHERE Name between 'G' and 'Heb' 
+--- 9 Records
+--- Check the Locks 
+select resource_type, resource_description, resource_associated_entity_id, request_mode
+, request_type, request_status, request_session_id
+from sys.dm_tran_locks
+where request_session_id = @@spid
+
+-- commit 
+
+SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
+go
+BEGIN TRANSACTION
+SELECT Name 
+FROM Production.Product
+WHERE Name between 'G' and 'Heb' 
+--- 9 Records
+--- Check the Locks 
+select resource_type, resource_description, resource_associated_entity_id, request_mode
+, request_type, request_status, request_session_id
+from sys.dm_tran_locks
+where request_session_id = @@spid
+-- Commit
+
+
+
+--Back to normal
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED
+--Cleanup
+ROLLBACK TRANSACTION
+
+
+/*
+This Sample Code is provided for the purpose of illustration only and is not intended to be used in a production environment.  
+THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.  
+We grant You a nonexclusive, royalty-free right to use and modify the 
+Sample Code and to reproduce and distribute the object code form of the Sample Code, provided that You agree: (i) to not use Our name, logo, or trademarks to market Your software product in which the Sample Code is embedded; 
+(ii) to include a valid copyright notice on Your software product in which the Sample Code is 
+embedded; and 
+(iii) to indemnify, hold harmless, and defend Us and Our suppliers from and against any claims or lawsuits, including attorneys’ fees, that arise or result from the use or distribution of the Sample Code.
+Please note: None of the conditions outlined in the disclaimer above will supercede the terms and conditions contained within the Premier Customer Services Description.
+*/
