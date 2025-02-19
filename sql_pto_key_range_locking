@@ -26,7 +26,7 @@ select resource_type, resource_description, resource_associated_entity_id, reque
 from sys.dm_tran_locks
 where request_session_id = @@spid
 --one share lock at the database level
--- COMMIT
+-- ROLLBACK
 
 SET TRANSACTION ISOLATION LEVEL REPEATABLE READ
 GO
@@ -42,7 +42,7 @@ select resource_type, resource_description, resource_associated_entity_id, reque
 from sys.dm_tran_locks
 where request_session_id = @@spid
 --database share lock, page intent share lock (prevents updates from other sessions)
--- COMMIT 
+-- ROLLBACK 
 
 SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
 go
@@ -57,7 +57,7 @@ select resource_type, resource_description, resource_associated_entity_id, reque
 from sys.dm_tran_locks
 where request_session_id = @@spid
 --database share lock, page intent share lock (prevents updates from other sessions)
--- COMMIT
+-- ROLLBACK
 
 --Back to normal
 SET TRANSACTION ISOLATION LEVEL READ COMMITTED
