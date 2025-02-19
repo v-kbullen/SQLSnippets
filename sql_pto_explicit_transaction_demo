@@ -206,8 +206,8 @@ END CATCH
 GO
 
 -- Test the Stored Procedure
-EXECUTE dbo.BankTransfer 
-GO;
+EXECUTE dbo.BankTransfer; 
+GO
 
 -- Test to see if records were updated.
 SELECT * FROM Accounting.BankAccounts;
@@ -245,4 +245,7 @@ EXECUTE dbo.BankTransfer 743.23, 2, 1
 SELECT * FROM Accounting.BankAccounts;
 
 --Clean up demonstration.
+USE master
+GO
+
 DROP DATABASE IF EXISTS WoodgroveBank;
