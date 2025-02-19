@@ -1,0 +1,67 @@
+--connection 0
+USE master
+GO
+
+DROP DATABASE IF EXISTS deadlock03292023
+GO
+
+CREATE DATABASE deadlock03292023
+GO
+
+USE deadlock03292023
+GO
+
+-- Create TableA
+CREATE TABLE TableA (ID INT, Name NVARCHAR(50));
+INSERT INTO TableA VALUES (1, 'Alice'), (2, 'Bob');
+
+-- Create TableB
+CREATE TABLE TableB (ID INT, Name NVARCHAR(50));
+INSERT INTO TableB VALUES (1, 'Charlie'), (2, 'David');
+
+--connection 1
+USE deadlock03292023
+GO
+
+BEGIN TRANSACTION;
+UPDATE TableA SET Name = 'Alice Updated' WHERE ID = 1;
+WAITFOR DELAY '00:00:30'; -- Wait for 30 seconds
+UPDATE TableB SET Name = 'Charlie Updated' WHERE ID = 1;
+COMMIT TRANSACTION;
+
+--connection 2
+USE deadlock03292023
+GO
+
+BEGIN TRANSACTION;
+UPDATE TableB SET Name = 'David Updated' WHERE ID = 2;
+WAITFOR DELAY '00:00:30'; -- Wait for 30 seconds
+UPDATE TableA SET Name = 'Bob Updated' WHERE ID = 2;
+COMMIT TRANSACTION;
+
+/*
+In this scenario:
+
+Connection 1 starts by updating TableA and then waits for 30 seconds before attempting to update TableB.
+Connection 2 starts by updating TableB and then waits for 30 seconds before attempting to update TableA.
+This creates a deadlock because:
+
+Connection 1 holds a lock on TableA and is waiting for a lock on TableB.
+Connection 2 holds a lock on TableB and is waiting for a lock on TableA.
+*/
+
+WITH cteDeadLocks ([Deadlock_XML])
+AS (SELECT CAST (target_data AS XML) AS [Deadlock_XML]
+    FROM sys.dm_xe_sessions AS xs
+         INNER JOIN sys.dm_xe_session_targets AS xst
+             ON xs.[address] = xst.event_session_address
+    WHERE xs.[name] = 'system_health'
+          AND xst.target_name = 'ring_buffer')
+SELECT x.Graph.query('(event/data/value/deadlock)[1]') AS Deadlock_XML,
+       x.Graph.value('(event/data/value/deadlock/process-list/process/@lastbatchstarted)[1]', 'datetime2(3)') AS when_occurred--,
+       --DB_Name(x.Graph.value('(event/data/value/deadlock/process-list/process/@currentdb)[1]', 'int')) AS DB --Current database of the first listed process
+FROM (SELECT Graph.query('.') AS Graph
+      FROM cteDeadLocks AS c
+      CROSS APPLY c.[Deadlock_XML].nodes('RingBufferTarget/event[@name="xml_deadlock_report"]') AS Deadlock_Report(Graph)) AS x
+ORDER BY when_occurred DESC;
+
