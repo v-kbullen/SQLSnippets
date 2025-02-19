@@ -41,7 +41,11 @@ select resource_type, resource_description, resource_associated_entity_id, reque
 , request_type, request_status, request_session_id
 from sys.dm_tran_locks
 where request_session_id = @@spid
---database share lock, page intent share lock (prevents updates from other sessions)
+--database share lock
+--object lock (specifically targets an entire database object, eg table)
+--page lock (An 8-kilobyte (KB) page in a database, such as data or index pages)
+--key lock (A row lock within an index used to protect key ranges in serializable transactions)
+
 -- ROLLBACK 
 
 SET TRANSACTION ISOLATION LEVEL SERIALIZABLE
