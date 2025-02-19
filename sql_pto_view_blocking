@@ -1,0 +1,103 @@
+/*
+This Sample Code is provided for the purpose of illustration only and is not intended to be used in a production environment.  
+THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.  
+We grant You a nonexclusive, royalty-free right to use and modify the 
+Sample Code and to reproduce and distribute the object code form of the Sample Code, provided that You agree: (i) to not use Our name, logo, or trademarks to market Your software product in which the Sample Code is embedded; 
+(ii) to include a valid copyright notice on Your software product in which the Sample Code is 
+embedded; and 
+(iii) to indemnify, hold harmless, and defend Us and Our suppliers from and against any claims or lawsuits, including attorneys’ fees, that arise or result from the use or distribution of the Sample Code.
+Please note: None of the conditions outlined in the disclaimer above will supercede the terms and conditions contained within the Premier Customer Services Description.
+*/
+/***************************************************************************
+RUN THE BELOW Queries to Create a blocking session
+***************************************************************************/
+USE AdventureWorks2022
+GO
+
+BEGIN TRANSACTION
+UPDATE [Production].[Product]
+SET [Name] = 'New Name'
+WHERE ProductID = 2
+-- ROLLBACK TRANSACTION
+
+/***************************************************************************
+Open new query window for Script View_Lock_Blocking_Part2.sql and execute the queries.
+***************************************************************************/
+/***************************************************************************
+RUN THE BELOW Queries to Create a Blockee session
+***************************************************************************/
+USE AdventureWorks2022
+go
+
+SELECT * 
+FROM [PRODUCTION].[PRODUCT]
+
+
+/***************************************************************************
+Open new query window for Script View_Lock_Blocking_Part2.sql to view the Blocking 
+***************************************************************************/
+/***************************************************************************
+RUN THE BELOW Queries to check Blocking information
+***************************************************************************/
+USE AdventureWorks2022
+GO
+
+SELECT * 
+FROM sys.dm_tran_locks;
+
+-- Look under the "request_status" column - the second connection 
+-- is blocked waiting for a shared lock (S).  You can see in that 
+-- column there's a WAIT request_status.
+
+-- If time permits, use the values in the resource_description
+-- and resource_associated_entity_id columns to trace the locks
+-- back to the actual objects using the metadata catalog views
+
+/* Sample Metadata queries
+
+-- For Page or Key resources
+SELECT object_name(p.object_id) as object_name
+, i.name as index_name
+, p.object_id
+, p.index_id
+, p.partition_number
+FROM sys.partitions p
+INNER JOIN sys.indexes i 
+	ON i.object_id = p.object_id
+		AND i.index_id = p.index_id
+WHERE p.hobt_id = 72057594051362816
+
+-- For Page resources
+DBCC TRACEON(3604)
+GO
+DBCC PAGE (5,1,813,3)
+GO
+
+-- For Key resources
+SELECT *
+FROM Production.Product WITH(NOLOCK)
+WHERE %%lockres%% = '(61a06abd401c)' -- Key hash obtained from resource_description column
+*/
+
+SELECT * 
+FROM sys.dm_os_waiting_tasks
+WHERE blocking_session_id IS NOT NULL;
+-- the above should return at least 1 row as we have a blocking 
+-- session in-flight
+
+SELECT * 
+FROM sys.dm_exec_requests 
+WHERE blocking_session_id > 0;
+-- the above should also return at least 1 row as we have a blocking 
+-- session in-flight
+
+SELECT * 
+FROM sys.sysprocesses 
+WHERE blocked > 0
+
+-- If time permits, also demonstrate viewing blocking via
+-- Activity Monitor, Performance Dashboard Reports and SSMS Reports
+
+/***************************************************************************
+Return to the View_Lock_Blocking_Part1.sql and rollback the transactions.
+***************************************************************************/
