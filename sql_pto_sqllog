@@ -1,0 +1,180 @@
+/* 
+This Sample Code is provided for the purpose of illustration only and is not intended
+to be used in a production environment.  THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE
+PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR
+PURPOSE.  We grant You a nonexclusive, royalty-free right to use and modify the Sample Code
+and to reproduce and distribute the object code form of the Sample Code, provided that You
+agree: (i) to not use Our name, logo, or trademarks to market Your software product in which
+the Sample Code is embedded; (ii) to include a valid copyright notice on Your software product
+in which the Sample Code is embedded; and (iii) to indemnify, hold harmless, and defend Us and
+Our suppliers from and against any claims or lawsuits, including attorneys fees, that arise or
+result from the use or distribution of the Sample Code.
+*/
+
+-- Lets review how the Transaction Log works over different Recovery Models
+USE [master]
+GO
+
+DROP DATABASE IF EXISTS SQLLogUsage
+GO
+
+CREATE DATABASE SQLLogUsage
+GO
+
+ALTER DATABASE SQLLogUsage SET RECOVERY SIMPLE
+GO
+
+BACKUP DATABASE SQLLogUsage TO DISK='SQLLogUsageSimple.bak'
+GO
+
+USE [SQLLogUsage]
+GO
+SELECT db_name(database_id) as DB,
+	total_log_size_in_bytes/1024.00/1024.00 as LogSizeMB,
+	used_log_space_in_bytes/1024.00/1024.00 as UsedLogMB,
+	used_log_space_in_percent,
+	log_space_in_bytes_since_last_backup/128 as LogSpaceMBSinceLastBackup
+FROM sys.dm_db_log_space_usage;
+-- Notice the Log Size is 8MB and it is used in 6%
+GO
+
+SELECT * FROM sys.dm_db_log_info(DB_ID())
+-- The transaction log for the database has only 4 VLFs and only one used (status=2)
+GO
+
+SELECT * FROM sys.dm_db_log_stats(DB_ID())
+-- Review the total vlf count and the size of each one, also the log truncation_holdupreason theat is NOTHING
+GO
+
+-- Under the simple recovery model 
+-- Every transaction is still written to the transaction log, 
+-- but once the transaction is complete and the data has been written to the data file 
+-- the space that was used in the transaction log file is now re-usable by new transactions.
+
+CREATE TABLE SQLObjectAllocation (Col1 int, Col2 float, Col3 varchar(2000), Col4 datetime, Col5 varchar(1000))
+GO
+
+-- INSERT 3.5 K record with automatic transactions
+SET NOCOUNT ON
+DECLARE @i int =0
+WHILE (@i<3500)
+BEGIN
+	INSERT INTO SQLObjectAllocation VALUES (1,2.0,Replicate ('A',2000), getdate(), Replicate('B',1000))
+	SET @i+=1
+END
+GO
+
+--After the inserts review the metrics
+SELECT db_name(database_id) as DB,
+	total_log_size_in_bytes/1024.00/1024.00 as LogSizeMB,
+	used_log_space_in_bytes/1024.00/1024.00 as UsedLogMB,
+	used_log_space_in_percent,
+	log_space_in_bytes_since_last_backup/128 as LogSpaceMBSinceLastBackup
+FROM sys.dm_db_log_space_usage;
+-- Log size is still 8MB, and 65% is used
+GO
+
+SELECT * FROM sys.dm_db_log_info(DB_ID())
+-- You will see 3 or 4 VLSf are used (status=2), those will be released ofter the data has been written to the data file.
+GO
+
+SELECT * FROM sys.dm_db_log_stats(DB_ID())
+-- The column log_truncation_holdup_reason  will show up NOTHING
+GO
+
+-- Wait for a couple of minutes and let the chekpoint happens, after that review again the VLFs
+CHECKPOINT
+
+SELECT * FROM sys.dm_db_log_info(DB_ID())
+-- You will see the last VLF in use, if you repeat the operation then the first 3 VLFs will be used.
+-- The transaction log is cirular.
+GO
+
+-- Swith to full recovery model.
+USE [master]
+GO
+
+DROP DATABASE IF EXISTS SQLLogUsage
+GO
+
+CREATE DATABASE [SQLLogUsage]
+ CONTAINMENT = NONE
+ ON  PRIMARY 
+( NAME = N'SqlLogFile', FILENAME = N'C:\Program Files\Microsoft SQL Server\MSSQL16.SQL22INST1\MSSQL\DATA\SqlLogFile.mdf' , SIZE = 8192KB , FILEGROWTH = 65536KB )
+ LOG ON 
+( NAME = N'SqlLogFile_log', FILENAME = N'C:\Program Files\Microsoft SQL Server\MSSQL16.SQL22INST1\MSSQL\DATA\SqlLogFile_log.ldf' , SIZE = 4096KB , FILEGROWTH = 4096KB )
+ WITH LEDGER = OFF
+GO
+
+ALTER DATABASE SQLLogUsage SET RECOVERY FULL
+GO
+
+BACKUP DATABASE SQLLogUsage TO DISK='SQLLogUsageFull.bak'
+GO
+
+USE [SQLLogUsage]
+GO
+
+CREATE TABLE SQLObjectAllocation (Col1 int, Col2 float, Col3 varchar(2000), Col4 datetime, Col5 varchar(1000))
+GO
+
+-- INSERT 3.5 K record with automatic transactions
+SET NOCOUNT ON
+DECLARE @i int =0
+WHILE (@i<3500)
+BEGIN
+	INSERT INTO SQLObjectAllocation VALUES (1,2.0,Replicate ('A',2000), getdate(), Replicate('B',1000))
+	SET @i+=1
+END
+GO
+
+--After the inserts review the metrics
+SELECT db_name(database_id) as DB,
+	total_log_size_in_bytes/1024.00/1024.00 as LogSizeMB,
+	used_log_space_in_bytes/1024.00/1024.00 as UsedLogMB,
+	used_log_space_in_percent,
+	log_space_in_bytes_since_last_backup/128 as LogSpaceMBSinceLastBackup
+FROM sys.dm_db_log_space_usage;
+-- Log size 72MB, and 22% is used
+GO
+
+SELECT * FROM sys.dm_db_log_info(DB_ID())
+-- You will see the first 5 VLFs in use (status=2)
+GO
+
+CHECKPOINT
+GO
+
+SELECT * FROM sys.dm_db_log_stats(DB_ID())
+-- The column log_truncation_holdup_reason  will show up LOG_BACKUP
+-- This means that even when the transactions are written to disk there is a reason to hold the transactions, in this case a LOG_BACKUP
+GO
+
+BACKUP LOG SQLLogUsage TO DISK='SQLLogUsageFull.trn'
+GO
+
+--After the log backup review the metrics
+SELECT db_name(database_id) as DB,
+	total_log_size_in_bytes/1024.00/1024.00 as LogSizeMB,
+	used_log_space_in_bytes/1024.00/1024.00 as UsedLogMB,
+	used_log_space_in_percent,
+	log_space_in_bytes_since_last_backup/128 as LogSpaceMBSinceLastBackup
+FROM sys.dm_db_log_space_usage;
+-- Log size 72MB, and 11% is used
+GO
+
+SELECT * FROM sys.dm_db_log_info(DB_ID())
+-- You will see only 1 VLF in use (status=2)
+GO
+
+SELECT * FROM sys.dm_db_log_stats(DB_ID())
+-- The column log_truncation_holdup_reason  will show up NOTHING
+GO
+
+-- Lets review how the Transaction Log works over different Recovery Models
+USE [master]
+GO
+
+DROP DATABASE IF EXISTS SQLLogUsage
+GO
