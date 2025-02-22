@@ -11,7 +11,7 @@ Please note: None of the conditions outlined in the disclaimer above will superc
 /***************************************************************************
 RUN THE BELOW Queries to Create a blocking session
 ***************************************************************************/
-USE AdventureWorks2022
+USE AdventureWorksPTO
 GO
 
 --run in it's own window
