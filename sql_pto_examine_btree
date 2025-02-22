@@ -95,6 +95,7 @@ print_option: Determines the level of detail to display. The options are:
 3: Page header plus detailed per-row interpretation.
 */
 DBCC PAGE(2, 1, 425, 3); --make sure you are selecting correct fileid 
+*view results, not messages
 
 /*
 Note that the PageID in the root node is DIFFERENT from the pageid we had to
