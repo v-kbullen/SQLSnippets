@@ -1,0 +1,204 @@
+/*
+This Sample Code is provided for the purpose of illustration only and is not intended to be used in a production environment.  
+THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.  
+We grant You a nonexclusive, royalty-free right to use and modify the 
+Sample Code and to reproduce and distribute the object code form of the Sample Code, provided that You agree: (i) to not use Our name, logo, or trademarks to market Your software product in which the Sample Code is embedded; 
+(ii) to include a valid copyright notice on Your software product in which the Sample Code is 
+embedded; and 
+(iii) to indemnify, hold harmless, and defend Us and Our suppliers from and against any claims or lawsuits, including attorneys’ fees, that arise or result from the use or distribution of the Sample Code.
+Please note: None of the conditions outlined in the disclaimer above will supercede the terms and conditions contained within the Premier Customer Services Description.
+*/
+
+USE master
+GO
+
+DROP DATABASE IF EXISTS SQL_Data_Structures
+GO
+
+--------------Prep Work ------------------------
+CREATE DATABASE SQL_Data_Structures;
+GO
+
+USE SQL_Data_Structures;
+GO
+
+DROP TABLE IF EXISTS TableMetaData;
+GO
+
+--- Create a simple partitioned Table, with atleast 1 LOB column.
+IF EXISTS (SELECT * FROM sys.partition_schemes WHERE name = 'MyTestPartScheme')
+    DROP PARTITION SCHEME MyTestPartScheme;
+GO
+IF EXISTS (SELECT * FROM sys.partition_functions WHERE name = 'MyTestPartFunc')
+    DROP PARTITION FUNCTION MyTestPartFunc;
+GO
+
+--------Create Partition Table --------
+CREATE PARTITION FUNCTION MyTestPartFunc ( INT )
+AS RANGE LEFT FOR VALUES ( 100, 300 );
+GO
+CREATE PARTITION SCHEME MyTestPartScheme
+AS PARTITION MyTestPartFunc
+ALL TO ( [PRIMARY] );
+GO
+
+/* table designed to use all three allocation types.
+   we have columns definitely going into in-row (int, datetime)
+   we have columns definitely going into lob storage (nvarchar(max)
+   we have string columns that may use row overflow.  */
+
+CREATE TABLE dbo.TableMetaData (
+    Col1 INT,
+    Col2 INT,
+    Col3 DATETIME,
+    Col4 VARCHAR(3000), --Row OverFlow
+    col5 VARCHAR(3000),
+    Col6 NVARCHAR(MAX), -- blob
+    Col7 VARCHAR(5000)
+) ON MyTestPartScheme (Col1);
+
+--- Let's Check the Table MetaData 
+--Partitions 
+SELECT * FROM sys.partitions WHERE object_id = OBJECT_ID('TableMetaData');
+
+----------------------------------Accessing Metadata-------------------
+--Allocation Units
+SELECT o.name AS table_name, p.index_id, i.name AS index_name, 
+				au.type_desc AS allocation_type,
+			 au.data_pages, partition_number
+FROM SYS.ALLOCATION_UNITS AS au
+     JOIN SYS.PARTITIONS				AS p 
+			ON au.container_id = p.partition_id
+     JOIN SYS.OBJECTS					AS o 
+			ON p.object_id = o.object_id
+     JOIN SYS.INDEXES AS i 
+			ON p.index_id = i.index_id AND i.object_id = p.object_id
+WHERE o.name = 'TableMetaData'
+ORDER BY o.name, p.index_id;
+
+--Indexes
+SELECT * FROM sys.indexes WHERE object_id = OBJECT_ID('TableMetaData');
+
+-- or 
+-- SP_HELPINDEX doesn't SHOW HEAP, that's the reason there is no results
+EXEC sp_helpindex 'TableMetaData';
+
+--this does not show included columns or filters
+
+----- Insert a record into the table 
+INSERT INTO TableMetaData
+VALUES ( 1, 2, GETDATE(), REPLICATE('A', 3000), REPLICATE('B', 3000), 
+				REPLICATE('D', 6000), REPLICATE('E', 30));
+
+/* notice:
+-- rows only in  IN_ROW_DATA pages
+-- no rows in ROW_OVERFLOW_DATA pages
+--
+-- because the total bytes in the string fields = 3000+3000+30=6030 which is less than 8192 bytes */
+--
+SELECT *
+FROM SYS.ALLOCATION_UNITS
+WHERE container_id IN ( SELECT partition_id
+										FROM sys.partitions
+										WHERE object_id = OBJECT_ID('TableMetaData')
+										)
+	AND
+		type_desc = 'IN_ROW_DATA'
+ORDER BY container_id;
+
+--- ROW_OVERFLOW_DATA
+SELECT *
+FROM SYS.ALLOCATION_UNITS
+WHERE container_id IN ( SELECT partition_id
+										FROM sys.partitions
+										WHERE object_id = OBJECT_ID('TableMetaData')
+										)
+	AND
+	type_desc = 'ROW_OVERFLOW_DATA'
+ORDER BY container_id;
+
+-------Lob data 
+SELECT *
+FROM sys.allocation_units
+WHERE container_id IN ( SELECT partition_id
+                        FROM sys.partitions
+                        WHERE object_id = OBJECT_ID('TableMetaData'))
+	AND
+	type_desc = 'LOB_DATA'
+ORDER BY container_id;
+
+--------Now Let's Add some ROW_OVERFLOW_DATA pages------
+-- lets reset the table contents
+TRUNCATE TABLE TableMetaData;
+
+/* with last column at 3000 bytes instead of 30, 
+   string fields push bytes for main row over the limit.  
+   so 1 string stored in row overflow.
+*/
+INSERT INTO TableMetaData
+VALUES ( 1, 2, GETDATE(), REPLICATE('A', 3000), REPLICATE('B', 3000), 
+				REPLICATE('D', 60000), REPLICATE('E', 3000));
+
+/* notice:
+-- rows on IN_ROW_DATA pages
+-- AND
+-- rows in ROW_OVERFLOW_DATA pages
+--
+*/
+SELECT *
+FROM sys.allocation_units
+WHERE container_id IN ( SELECT partition_id
+                        FROM sys.partitions
+                        WHERE object_id = OBJECT_ID('TableMetaData'))
+	AND
+	type_desc = 'IN_ROW_DATA'
+ORDER BY container_id;
+
+SELECT *
+FROM sys.allocation_units
+WHERE container_id IN ( SELECT partition_id
+                        FROM sys.partitions
+                        WHERE object_id = OBJECT_ID('TableMetaData'))
+	AND
+	type_desc = 'ROW_OVERFLOW_DATA'
+ORDER BY container_id;
+
+--------------LOB Data 
+SELECT *
+FROM sys.allocation_units
+WHERE container_id IN ( SELECT partition_id
+                        FROM sys.partitions
+                        WHERE object_id = OBJECT_ID('TableMetaData'))
+	AND
+	type_desc = 'LOB_DATA'
+ORDER BY container_id;
+
+--- Let's check the Allocation Unit Information (since the value for Col1 was 1, this record 
+--- ends up in the 1st partition
+
+-- Let's dump the pages for this Table. 
+SELECT object_id, allocation_unit_id, allocation_unit_type_desc, extent_file_id AS FileNumnber,
+    extent_page_id AS ExtentStartPage, allocated_page_page_id AS PageID, page_type_desc,
+    is_page_compressed
+FROM sys.dm_db_database_page_allocations(DB_ID('SQL_Data_Structures'), OBJECT_ID('TableMetaData'), 0, NULL, 'DETAILED');
+
+/*
+It is important to understand the Table Structure. 
+
+Here we have 7 columns in the Table. 
+
+Col1, Col2 and Col3 are all fixed length columns and hence would always be In_Row. 
+Col4, Col5 and Col7 are variable length columns and may/maynot resides as In_Row Data (moved to Row Overflow). 
+
+In this case the variable length columns are only 3000 bytes in size, which means 2 of these columns can reside 
+In_Row while 1 has to be moved as Row_Overflow. 
+
+Col6 which is a LOB column would be stored as a LOB structure. 
+*/
+
+-- Clean up
+USE MASTER
+GO
+
+DROP DATABASE SQL_Data_Structures;
+GO
