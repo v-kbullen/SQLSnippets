@@ -1,0 +1,205 @@
+/*
+This Sample Code is provided for the purpose of illustration only and is not intended to be used in a production environment.  
+THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.  
+We grant You a nonexclusive, royalty-free right to use and modify the 
+Sample Code and to reproduce and distribute the object code form of the Sample Code, provided that You agree: (i) to not use Our name, logo, or trademarks to market Your software product in which the Sample Code is embedded; 
+(ii) to include a valid copyright notice on Your software product in which the Sample Code is 
+embedded; and 
+(iii) to indemnify, hold harmless, and defend Us and Our suppliers from and against any claims or lawsuits, including attorneys’ fees, that arise or result from the use or distribution of the Sample Code.
+Please note: None of the conditions outlined in the disclaimer above will supercede the terms and conditions contained within the Premier Customer Services Description.
+*/
+
+/* this demo shows the impact of wide versus narrow clustered indexes.
+   in this case, the width varies because of a uniquifier, but the storage impact and 
+   increase in logical reads when queries execute is the same for any wide vs narrow key.
+
+   loading data may take a minute or two.
+*/
+SET NOCOUNT ON;
+GO
+
+USE tempdb;
+GO
+
+/* create 3 tables with the same columns.  */
+DROP TABLE IF EXISTS unique_table;
+DROP TABLE IF EXISTS unique_but_not;
+DROP TABLE IF EXISTS not_unique;
+GO
+
+CREATE TABLE dbo.UNIQUE_TABLE   ( ID INT NOT NULL, COL1 INT NULL, COL2 CHAR(10) NULL );
+CREATE TABLE dbo.UNIQUE_BUT_NOT ( ID INT NOT NULL, COL1 INT NULL, COL2 CHAR(10) NULL );
+CREATE TABLE dbo.NOT_UNIQUE     ( ID INT NULL    , COL1 INT NULL, COL2 CHAR(10) NULL );
+GO
+
+/* load the data.  
+   
+   in the first two tables, 
+   all the entries in the ID column are unique.
+   in the 3rd table, none of the values are unique 
+*/
+
+CREATE TABLE dbo.Number (
+        N INT CONSTRAINT Number_PK PRIMARY KEY CLUSTERED(N)
+        );
+GO	
+WITH
+        L0   AS(SELECT 1 AS C UNION ALL SELECT 1 AS O), -- 2 rows
+        L1   AS(SELECT 1 AS C FROM L0 AS A CROSS JOIN L0 AS B), -- 4 rows
+        L2   AS(SELECT 1 AS C FROM L1 AS A CROSS JOIN L1 AS B), -- 16 rows
+        L3   AS(SELECT 1 AS C FROM L2 AS A CROSS JOIN L2 AS B), -- 256 rows
+        L4   AS(SELECT 1 AS C FROM L3 AS A CROSS JOIN L3 AS B), -- 65,536 rows
+        L5   AS(SELECT 1 AS C FROM L4 AS A CROSS JOIN L4 AS B), -- 4,294,967,296 rows
+        Nums AS(SELECT ROW_NUMBER() OVER(ORDER BY (SELECT NULL)) AS N FROM L5)
+INSERT INTO dbo.Number SELECT TOP (10000) N FROM Nums ORDER BY N;
+GO
+
+-- Unique values
+INSERT INTO UNIQUE_TABLE SELECT N, N, 'X' FROM dbo.Number;
+GO 
+
+-- Unique values
+INSERT INTO UNIQUE_BUT_NOT SELECT TOP (5000) N, N, 'Y' FROM dbo.Number;
+GO 2
+
+-- Duplicate key values
+INSERT INTO NOT_UNIQUE SELECT TOP (5000) N, N, 'Z' FROM dbo.Number;
+GO 2
+
+DROP TABLE dbo.Number;
+GO
+
+/* create clustered indices.  note only the first table has a unique clustered index */
+CREATE UNIQUE CLUSTERED INDEX IX_CLUSTERED ON dbo.UNIQUE_TABLE   ( ID );
+CREATE        CLUSTERED INDEX IX_CLUSTERED ON dbo.UNIQUE_BUT_NOT ( ID );
+CREATE        CLUSTERED INDEX IX_CLUSTERED ON dbo.NOT_UNIQUE     ( ID );
+GO	
+
+/* create some nonclustered indexes*/
+CREATE NONCLUSTERED INDEX IX_1 ON dbo.NOT_UNIQUE     ( COL2 );
+CREATE NONCLUSTERED INDEX IX_1 ON dbo.UNIQUE_BUT_NOT ( COL2 );
+CREATE NONCLUSTERED INDEX IX_1 ON dbo.UNIQUE_TABLE   ( COL2 );
+GO	
+
+/* compare the size of the CLUSTERED indices */
+SELECT 
+	o.name AS table_name, 
+	p.index_id, 
+	i.name AS index_name, 
+	au.type_desc AS allocation_type,
+    au.data_pages, 
+	partition_number
+FROM 
+	sys.allocation_units AS au
+	JOIN sys.partitions AS p 
+		ON au.container_id = p.partition_id
+	JOIN sys.objects AS o 
+		ON p.object_id = o.object_id
+	JOIN sys.indexes AS i 
+		ON p.index_id = i.index_id 
+		AND i.object_id = p.object_id
+WHERE 
+	o.name IN ('unique_table', 'unique_but_not', 'not_unique') 
+	AND i.index_id = 1
+ORDER BY o.name, p.index_id;
+
+
+-- Checking root pages on 3 indexes
+SELECT 
+	'unique_table', allocated_page_file_id, allocated_page_page_id, page_type_desc, *
+FROM 
+	sys.dm_db_database_page_allocations(2, OBJECT_ID('unique_table'), 1, NULL, 'DETAILED')
+WHERE 
+	is_iam_page = 0 
+	AND page_type_desc IS NOT NULL
+	AND page_level = 1
+UNION ALL
+SELECT 
+	'unique_but_not', allocated_page_file_id, allocated_page_page_id, page_type_desc, *
+FROM 
+	sys.dm_db_database_page_allocations(2, OBJECT_ID('unique_but_not'), 1, NULL, 'DETAILED')
+WHERE 
+	is_iam_page = 0 
+	AND page_type_desc IS NOT NULL
+	AND page_level = 1
+UNION ALL
+SELECT 
+	'not_unique', allocated_page_file_id, allocated_page_page_id, page_type_desc, *
+FROM 
+	sys.dm_db_database_page_allocations(2, OBJECT_ID('not_unique'), 1, NULL, 'DETAILED')
+WHERE 
+	is_iam_page = 0 
+	AND page_type_desc IS NOT NULL
+	AND page_level = 1
+
+-- execute the DBCC PAGE for the data page, and see that it's full and whether page need UNIQUIFIER column  or not
+-- DBCC PAGE (<dbid>, <fileid>, <pageid>, 3);
+DBCC TRACEON(3604, -1);
+-- replace file# and page# with the data from previous results into queries below
+
+-- unique_table
+DBCC PAGE(2, 9, 32, 3) WITH TABLERESULTS; --> there isn't UNIQUIFIER COLUMN!
+-- unique_but_not
+DBCC PAGE(2, 7, 72, 3) WITH TABLERESULTS; --> can you see UNIQUIFIER column ?
+-- not_unique
+DBCC PAGE(2, 5, 176, 3) WITH TABLERESULTS;--> can you see UNIQUIFIER column ?
+
+
+/* 
+The table with duplicate values in the Clustered Index column has 5 more data
+pages than the tables where the values in the ID column are unique.
+This is due to the 4-byte Uniqueifier that was tacked onto each of duplicate
+key values.
+
+Notes 
+-----
+1 - when there are no DUPLICATED values on key column the value on UNIQUIFIER is NULL
+2 - if we insert rows with DUPLICATED KEY, then UNIQUIFIER COLUMN will have values from 0 to ... that it didn't matter whether we explicity declared the clustered index
+*/
+
+
+/* now, check the NONCLUSTER indexes.  because the clustered index is embedded in 
+the nonclustered index, that extra storage is needed here, too. */
+SELECT 
+	o.name AS table_name, 
+	p.index_id, 
+	i.name AS index_name, 
+	au.type_desc AS allocation_type,
+    au.data_pages, 
+	partition_number
+FROM 
+	sys.allocation_units AS au
+	JOIN sys.partitions AS p 
+		ON au.container_id = p.partition_id
+	JOIN sys.objects AS o 
+		ON p.object_id = o.object_id
+	JOIN sys.indexes AS i 
+		ON p.index_id = i.index_id 
+		AND i.object_id = p.object_id
+WHERE 
+	o.name IN ('unique_table', 'unique_but_not', 'not_unique') 
+	AND i.index_id > 1
+ORDER BY 
+	o.name, p.index_id;
+/*
+	Here we can see that the bloated clustered index key is also bloating the
+	nonclustered index in NOT_UNIQUE where it's more than twice the size of the
+	other tables' nonclustered indexes.
+*/
+
+/* execute queries against the clustered indices and check the IO requirements */
+SET STATISTICS IO ON;
+
+SELECT * FROM UNIQUE_TABLE;
+SELECT * FROM NOT_UNIQUE;
+GO
+/*
+	Table 'UNIQUE_TABLE'. Scan count 1, logical reads 36
+	Table 'NOT_UNIQUE'. Scan count 1, logical reads 41
+*/
+
+-- Clean up
+DROP TABLE dbo.UNIQUE_TABLE;
+DROP TABLE dbo.UNIQUE_BUT_NOT;
+DROP TABLE dbo.NOT_UNIQUE;
+GO
