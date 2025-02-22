@@ -1,0 +1,113 @@
+/*
+This Sample Code is provided for the purpose of illustration only and is not intended to be used in a production environment.  
+THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.  
+We grant You a nonexclusive, royalty-free right to use and modify the 
+Sample Code and to reproduce and distribute the object code form of the Sample Code, provided that You agree: (i) to not use Our name, logo, or trademarks to market Your software product in which the Sample Code is embedded; 
+(ii) to include a valid copyright notice on Your software product in which the Sample Code is 
+embedded; and 
+(iii) to indemnify, hold harmless, and defend Us and Our suppliers from and against any claims or lawsuits, including attorneys’ fees, that arise or result from the use or distribution of the Sample Code.
+Please note: None of the conditions outlined in the disclaimer above will supercede the terms and conditions contained within the Premier Customer Services Description.
+*/
+
+/* the following demo shows how b-trees are constructed.  */
+
+SET NOCOUNT ON;
+
+USE tempdb;
+GO
+
+DROP TABLE IF EXISTS forTest
+GO
+
+-- create the table:
+CREATE TABLE forTest ( col1 UNIQUEIDENTIFIER NOT NULL PRIMARY KEY, col2 CHAR(100) NOT NULL );
+GO
+
+-- when we insert with a newid(), we will not insert sequentially
+-- this will create the traditional type of page split:
+
+-- run to "end of step"
+DECLARE @count BIGINT = 1; -- will be used later
+
+WHILE @count < 65
+BEGIN
+    INSERT INTO forTest ( col1, col2 ) 
+	VALUES (NEWID(), 'test' );
+
+    SET @count = @count + 1;
+END;
+
+SELECT COUNT(*) 
+FROM forTest;
+
+-- end of step
+
+-- now look at page allocations for the object
+-- we only have one non-IAM page at this point, this is the root
+-- note the page number to use in the dbcc page command:
+----everything fits at root page   
+SELECT page_level,allocated_page_file_id, allocated_page_page_id, page_type_desc, *
+FROM sys.dm_db_database_page_allocations(db_id(), OBJECT_ID('forTest'), 1, NULL, 'DETAILED')
+WHERE is_iam_page = 0 AND page_type_desc IS NOT NULL
+GO
+
+-- execute the DBCC PAGE for the data page
+-- DBCC PAGE (<dbid>, <fileid>, <pageid>, 3);
+DBCC TRACEON(3604, -1);
+DBCC PAGE(2, 1, 424, 3); 
+
+-- stop here
+
+/*
+The next insert should cause a page split. Note the page number of this page
+and note also how much data occurs on this page.
+
+After you've noted this, go ahead and insert the next row, then we'll look at the new 
+structure:
+*/
+GO
+-------Let Us insert 1 more record which will cause page split and start making the B-tree
+DECLARE @uid UNIQUEIDENTIFIER;
+SET @uid = NEWID();
+INSERT INTO forTest ( col1, col2 ) VALUES ( @uid, 'test' );
+SELECT COUNT(*) FROM forTest;
+-- end of step
+
+-- now examine non-IAM pages in the object
+-- we now have two data pages and one index page
+-- the index page is the new root, note the page number
+SELECT Page_Level,allocated_page_file_id, allocated_page_page_id, page_type_desc, *
+FROM sys.dm_db_database_page_allocations(2, OBJECT_ID('forTest'), 1, NULL, 'DETAILED')
+WHERE is_iam_page = 0 AND page_type_desc IS NOT NULL
+GO
+
+-- end of step
+
+-- Look at the contents of the index page
+/*
+database_name | database_id: The name or ID of the database containing the page.
+file_id: The file number where the page is located.
+page_id: The page number within the file.
+print_option: Determines the level of detail to display. The options are:
+0: Only the page header.
+1: Page header plus per-row hex dumps.
+2: Page header plus whole page hex dump.
+3: Page header plus detailed per-row interpretation.
+*/
+DBCC PAGE(2, 1, 425, 3); --make sure you are selecting correct fileid 
+
+/*
+Note that the PageID in the root node is DIFFERENT from the pageid we had to
+use in the DBCC page above. 
+Note also that one of the ChildPageIDs IS the value of the old root node we had to use above.
+
+What has happened here is that the old root node split. We then had two nodes on the
+same level as the old root node. We then pushed up a new level and created a new
+node on this new level. This became our new root node, and we wrote pointers into it
+to point to the two nodes on the level that was our root node.
+
+What you see here is the NEW ROOT NODE AFTER THE NEW LEVEL WAS PUSHED UP. 
+Note that its PageID is different from the old root, and that the old root, and one new page
+(pointed to in the ChildPageID) are the two nodes on the old level. This illustrates
+our bottom-up construction on our B-Tree (B+Tree).
+*/
