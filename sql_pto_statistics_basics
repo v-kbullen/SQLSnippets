@@ -1,0 +1,137 @@
+/*
+This Sample Code is provided for the purpose of illustration only and is not intended to be used in a production environment.  
+THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.  
+We grant You a nonexclusive, royalty-free right to use and modify the 
+Sample Code and to reproduce and distribute the object code form of the Sample Code, provided that You agree: (i) to not use Our name, logo, or trademarks to market Your software product in which the Sample Code is embedded; 
+(ii) to include a valid copyright notice on Your software product in which the Sample Code is 
+embedded; and 
+(iii) to indemnify, hold harmless, and defend Us and Our suppliers from and against any claims or lawsuits, including attorneys’ fees, that arise or result from the use or distribution of the Sample Code.
+Please note: None of the conditions outlined in the disclaimer above will supercede the terms and conditions contained within the Premier Customer Services Description.
+*/
+
+
+--	=====================================================================
+--	Demo 1
+--	Exploring statistics 
+--  Use different methods to get statistics information
+--	=====================================================================
+
+USE AdventureWorks2022;
+GO
+
+-- 1. See all stats on the database and last update date
+select O.name table_name
+		, I.name index_name
+		, S.name stat_name
+		, STATS_DATE ( S.object_id , S.stats_id ) last_updated
+		, S.auto_created
+		, S.user_created
+		, S.no_recompute
+		, S.has_filter
+		, S.filter_definition
+		, S.is_temporary
+		, S.is_incremental
+from sys.stats S
+	inner join sys.objects O 
+		ON S.object_id = O.object_id
+	left join sys.indexes I 
+		ON S.object_id = I.object_id and S.stats_id = I.index_id
+
+-- 2. Lets examine statistics detail for a single object
+
+--- Get a list of indexes of a table 
+EXECUTE sp_helpindex 'Person.Address';
+
+-- 2.1 Show Statistics for index IX_Address_StateProvinceID on SSMS
+
+-- Go to Object Explorer and expand Databases -> SQLPTO -> AdventureWorksPTO -> Tables -> [Person].[Address] -> Statistics
+-- right click on [IX_Address_StateProvinceID] and select Properties. Go to the Details tab
+
+-- 2.2 Show statistics information using queries
+
+-- Open a new query to run DBCC SHOW_STATISTICS
+-- Do not close the query tab as you will be using it during the whole demo
+-- DESCRIBE:
+--		HEADER
+--		Density Vector
+--		Histogram
+
+DBCC SHOW_STATISTICS ('Person.Address', IX_Address_StateProvinceID);
+
+-- Open a new query to query sys.dm_db_stats_properties 
+-- Compare the result with the Header of DBCC SHOW_STATISTICS
+
+SELECT OBJECT_id('Person.Address'), I.index_id
+FROM sys.indexes I
+WHERE I.object_id = OBJECT_id('Person.Address')
+	  AND
+	  I.name = 'IX_Address_StateProvinceID' 
+
+select * from sys.dm_db_stats_properties (OBJECT_id('Person.Address'),4)
+
+-- Open a new query to query sys.dm_db_stats_histogram  
+-- Compare the result with the HISTOGRAM of DBCC SHOW_STATISTICS
+select * from sys.dm_db_stats_histogram (OBJECT_id('Person.Address'),4)
+
+--	=====================================================================
+--	Demo 2
+--	auto created statistics 
+--  See auto_create_statistic in action
+--	=====================================================================
+
+-- Look at existing stats on table Address
+select O.name table_name
+		, I.name index_name
+		, S.name stat_name
+		, STATS_DATE ( S.object_id , S.stats_id ) last_updated
+		, S.auto_created
+		, S.user_created
+		, S.no_recompute
+		, S.has_filter
+		, S.filter_definition
+		, S.is_temporary
+		, S.is_incremental
+from sys.stats S
+	inner join sys.objects O 
+		ON S.object_id = O.object_id
+	left join sys.indexes I 
+		ON S.object_id = I.object_id and S.stats_id = I.index_id
+where O.name = 'Address'
+
+-- Execute a query that filters on a column where no other stat exists
+SELECT *
+FROM   Person.Address
+WHERE  AddressLine2 = N'02139'; -- pick a column that doesn't have stats
+
+-- Look at existing stats on table Address
+-- Look for new stats (auto_created = 1)
+-- The Query Optimizer created the stat to improve the query plan 
+
+select O.name table_name
+		, I.name index_name
+		, S.name stat_name
+		, STATS_DATE ( S.object_id , S.stats_id ) last_updated
+		, S.auto_created
+		, S.user_created
+		, S.no_recompute
+		, S.has_filter
+		, S.filter_definition
+		, S.is_temporary
+		, S.is_incremental
+from sys.stats S
+	inner join sys.objects O 
+		ON S.object_id = O.object_id
+	left join sys.indexes I 
+		ON S.object_id = I.object_id and S.stats_id = I.index_id
+where O.name = 'Address'
+
+-- Idenitify the column where the stat was created on
+
+SELECT OBJECT_NAME(S.object_id) AS 'Object_name'
+		, S.name AS 'statistics_name'
+		, COL_NAME(SC.object_id, SC.column_id) AS 'Column'
+FROM sys.stats AS S 
+INNER JOIN sys.stats_columns AS SC
+	ON S.stats_id = SC.stats_id AND S.object_id = SC.object_id
+WHERE S.object_id = OBJECT_id('Person.Address')
+	AND S.auto_created = 1
