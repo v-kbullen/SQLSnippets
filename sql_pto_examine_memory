@@ -1,0 +1,57 @@
+/* This Sample Code is provided for the purpose of illustration only and is not intended 
+to be used in a production environment.  THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE 
+PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR 
+PURPOSE.  We grant You a nonexclusive, royalty-free right to use and modify the Sample Code
+and to reproduce and distribute the object code form of the Sample Code, provided that You 
+agree: (i) to not use Our name, logo, or trademarks to market Your software product in which
+the Sample Code is embedded; (ii) to include a valid copyright notice on Your software product
+in which the Sample Code is embedded; and (iii) to indemnify, hold harmless, and defend Us and
+Our suppliers from and against any claims or lawsuits, including attorneys’ fees, that arise or 
+result from the use or distribution of the Sample Code.
+*/
+--1). View the various memory clerks and their current memory allocations by name and memory node
+SELECT type
+       ,name
+       ,memory_node_id
+       ,SUM(pages_kb + virtual_memory_reserved_kb
+            + virtual_memory_committed_kb
+            + awe_allocated_kb
+            + shared_memory_reserved_kb
+            + shared_memory_committed_kb) AS TotalKB
+FROM
+  sys.dm_os_memory_clerks
+  -- uncomment the following line to see just the object store clerks
+  --where name like '%OBJ%'
+GROUP  BY
+  type
+  ,name
+  ,memory_node_id
+ORDER  BY
+  TotalKB DESC; 
+
+-- 2). View the current state of the memory brokers
+-- Note the current memory, the predicted future memory, the target memory and whether the memory is growing, shrinking or stable
+
+SELECT p.pool_id
+       ,p.name                   AS resource_governor_pool_name
+       ,max_memory_percent
+       ,max_cpu_percent
+       ,cap_cpu_percent
+       ,b.memory_broker_type
+       ,b.allocations_kb         AS current_memory_allocated_kb
+       ,b.allocations_kb_per_sec AS allocation_rate_in_kb_per_sec
+       ,b.future_allocations_kb  AS near_future_allocations_kb
+       ,b.target_allocations_kb
+       ,b.last_notification      AS last_memory_notification
+FROM
+  sys.dm_os_memory_brokers b
+  INNER JOIN sys.resource_governor_resource_pools p
+          ON p.pool_id = b.pool_id; 
+
+-- 3). View the output of sys.dm_os_loaded_modules
+/*This is one of those examples where you would have previously had to get a debugger to see a linked server to a 3rd party database, so here you can easily see what else has loaded in the SQL Server address space. A good example is 3rd party antivirus provider. If you have not put the exclusions on, you might see it loaded here, there was an issue with the BufferOverrun protection that would cause issues. SQL BPA and SQLRAP both checks for the BufferOverrun issue, but there could be many issues caused by under tested / unsupported modules loaded in the SQL Server address space. The recommendation is to look for anything non-Microsoft that may be loaded.*/
+
+SELECT * FROM sys.dm_os_loaded_modules
+
+
