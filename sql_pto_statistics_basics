@@ -16,7 +16,7 @@ Please note: None of the conditions outlined in the disclaimer above will superc
 --  Use different methods to get statistics information
 --	=====================================================================
 
-USE AdventureWorks2022;
+USE AdventureWorksPTO;
 GO
 
 -- 1. See all stats on the database and last update date
