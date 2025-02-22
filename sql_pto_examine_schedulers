@@ -1,0 +1,426 @@
+/* This Sample Code is provided for the purpose of illustration only and is not intended
+to be used in a production environment.  THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE
+PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING BUT
+NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR
+PURPOSE.  We grant You a nonexclusive, royalty-free right to use and modify the Sample Code
+and to reproduce and distribute the object code form of the Sample Code, provided that You
+agree: (i) to not use Our name, logo, or trademarks to market Your software product in which
+the Sample Code is embedded; (ii) to include a valid copyright notice on Your software product
+in which the Sample Code is embedded; and (iii) to indemnify, hold harmless, and defend Us and
+Our suppliers from and against any claims or lawsuits, including attorneys fees, that arise or
+result from the use or distribution of the Sample Code.*/
+
+-- Open this in Dedicated Administrator Connection
+-- ADMIN:FQDN\INSTANCE (open ssms, do not connect to anything)
+
+-- If connecting to node 64, than it is DAC
+SELECT connect_time, node_affinity 
+FROM sys.dm_exec_connections
+WHERE session_id = @@SPID
+GO
+
+-- Get configuration option "max worker threads"
+EXEC sp_configure 'show advanced options', 1;
+GO
+RECONFIGURE;
+GO
+
+-- Get number of currently used worker threads
+SELECT max_workers_count FROM sys.dm_os_sys_info
+GO
+
+-- Set the "max worker threads" value
+EXEC sp_configure 'max worker threads', 900;
+GO
+RECONFIGURE;
+GO
+
+-- Get number of currently used worker threads
+SELECT max_workers_count FROM sys.dm_os_sys_info
+GO
+
+/* what are the schedulers doing?.
+
+Note that schedulers used for user activity (visible online) are also managing 
+internal processes.
+note that current tasks for a scheduler_id doesn't match the total number of requests, though 
+it should be close (timing issue one factor affecting)
+*/
+
+select 'requests on each scheduler' as output_type
+   , s.parent_node_id
+   , s.scheduler_id
+   , s.cpu_id
+   , s.status
+   , case when r.session_id is not null then r.status
+          else 'no current request' end as request_type
+   , r.session_id
+   , r.command
+   , s.is_online
+   , s.is_idle
+   , s.yield_count            -- total times yielded, even if to itself
+   , s.context_switches_count -- total times yielded to other schedulers
+   -------------------------
+   , s.idle_switches_count       -- number of times scheduler's been idle
+   , cast(s.idle_switches_count * 1.0/(s.yield_count + s.idle_switches_count) * 100 as decimal(38, 2)) as idle_switches_pct_of_yield_and_idle
+
+   , s.preemptive_switches_count -- times control passed to the OS (e.g., xp_cmdshell, clr, distributed queries)
+   , cast(s.preemptive_switches_count * 1.0/(s.yield_count) * 100 as decimal(38, 2)) as preemptive_switches_pct_of_yield
+   , s.load_factor              -- high load factor
+   , s.current_tasks_count      -- high current tasks (all tasks in suspended, runnable, and running)
+   , s.runnable_tasks_count     -- high values indicate a deep queue waiting to get on a scheduler.
+   , s.work_queue_count
+   , s.pending_disk_io_count
+from sys.dm_os_schedulers s
+left join sys.dm_exec_requests r on r.scheduler_id = s.scheduler_id
+where (   (s.status like 'visible%' and s.status not like '%DAC%' )
+       or (s.status like 'hidden%'  )
+       or (s.status like '%DAC%'    )
+      )
+   and (s.is_online = 1
+      or s.is_online = 0 )
+order by scheduler_id, session_id
+
+/* indicators of historical load.
+These use the cumulative count metrics.  see next query for snapshot values.
+
+what percentage of switches are idle?
+   indicates times of no work to be done. denominator = yield + idle.  
+what's context switches vs yield?  
+   (1 - context %) indicates number of times that the quanta was used up, 
+   but nothing else in the queue so the task was able to go right back to work.
+what percentage of switches are preemptive (preemptive / total yield)?  
+   changes from baseline may help pinpoint source of CPU increase as coming from increased external calls to OS.
+ */
+
+select 'historical patterns' as output_type
+, s.parent_node_id
+, s.scheduler_id
+, s.cpu_id
+, s.status
+, s.is_online
+, s.is_idle
+, s.yield_count            -- total times yielded, even if to itself
+-------------------------
+, s.context_switches_count -- total times yielded to other schedulers
+, cast(s.context_switches_count * 1.0/(s.yield_count) * 100 as decimal(38, 2)) as context_switches_pct_of_yield
+-------------------------
+
+, s.idle_switches_count       -- number of times scheduler's been idle
+, cast(s.idle_switches_count * 1.0/(s.yield_count) * 100 as decimal(38, 2)) as idle_switches_pct_of_yield
+-------------------------
+, s.yield_count - s.context_switches_count - s.idle_switches_count as self_yielding_switches
+, cast((s.yield_count - s.context_switches_count - s.idle_switches_count) * 1.0/(s.yield_count) * 100 as decimal(38, 2)) as self_yielding_pct_of_yield
+-------------------------
+, s.preemptive_switches_count -- times control passed to the OS (e.g., xp_cmdshell, clr, distributed queries)
+, cast(s.preemptive_switches_count * 1.0/(s.yield_count+s.preemptive_switches_count) * 100 as decimal(38, 2)) as preemptive_switches_pct_of_yield_and_preemptive
+from sys.dm_os_schedulers s
+where (   (s.status like 'visible%' and s.status not like '%DAC%')
+       or (s.status like 'hidden%')
+       or (s.status like '%DAC%')
+      )
+   and (s.is_online = 1
+      or s.is_online = 0)
+
+/* signs of current pressure.
+The counters reflect current activity, rather than cumulative metrics.
+So, they really need to be evaluated within context of a baseline.   
+*/
+
+select 'current pressure' as output_type
+, parent_node_id
+, scheduler_id
+, cpu_id
+, status
+, is_online
+, is_idle              -- no idle schedulers?
+, load_factor          -- high load factor?
+, current_tasks_count  -- high current tasks (all tasks in suspended, runnable, and running)
+, runnable_tasks_count -- high values indicate a deep queue waiting to get on a scheduler.
+, work_queue_count     -- tasks in pending queue.  not sure of difference from runnable tasks  
+, pending_disk_io_count
+from sys.dm_os_schedulers s
+where (   (s.status like 'visible%' and s.status not like '%DAC%')
+       or (s.status like 'hidden%')
+       or (s.status like '%DAC%')
+      )
+   and (s.is_online = 1
+      or s.is_online = 0)
+order by scheduler_id, parent_node_id
+
+--You can simulate some activity before reviewing the below.
+--Leverage the Lab files for creating scenarios
+
+/*Requests
+-- View all current executing requests inside SQL Server
+--If there are no requests you wont find anything
+*/
+SELECT es.session_id, DB_NAME(er.database_id) AS [database_name], OBJECT_NAME(qp.objectid, qp.dbid) AS [object_name],
+	(SELECT REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+		qt.text,
+		NCHAR(1),N'?'),NCHAR(2),N'?'),NCHAR(3),N'?'),NCHAR(4),N'?'),NCHAR(5),N'?'),NCHAR(6),N'?'),NCHAR(7),N'?'),NCHAR(8),N'?'),NCHAR(11),N'?'),NCHAR(12),N'?'),NCHAR(14),N'?'),NCHAR(15),N'?'),NCHAR(16),N'?'),NCHAR(17),N'?'),NCHAR(18),N'?'),NCHAR(19),N'?'),NCHAR(20),N'?'),NCHAR(21),N'?'),NCHAR(22),N'?'),NCHAR(23),N'?'),NCHAR(24),N'?'),NCHAR(25),N'?'),NCHAR(26),N'?'),NCHAR(27),N'?'),NCHAR(28),N'?'),NCHAR(29),N'?'),NCHAR(30),N'?'),NCHAR(31),N'?') 
+		AS [text()]
+		FROM sys.dm_exec_sql_text(er.sql_handle) AS qt
+		FOR XML PATH(''), TYPE) AS [running_batch],
+	(SELECT REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+		SUBSTRING(qt2.text,
+		(CASE WHEN er.statement_start_offset = 0 THEN 0 ELSE er.statement_start_offset/2 END),
+		(CASE WHEN er.statement_end_offset = -1 THEN DATALENGTH(qt2.text) ELSE er.statement_end_offset/2 END - (CASE WHEN er.statement_start_offset = 0 THEN 0 ELSE er.statement_start_offset/2 END))),
+		NCHAR(1),N'?'),NCHAR(2),N'?'),NCHAR(3),N'?'),NCHAR(4),N'?'),NCHAR(5),N'?'),NCHAR(6),N'?'),NCHAR(7),N'?'),NCHAR(8),N'?'),NCHAR(11),N'?'),NCHAR(12),N'?'),NCHAR(14),N'?'),NCHAR(15),N'?'),NCHAR(16),N'?'),NCHAR(17),N'?'),NCHAR(18),N'?'),NCHAR(19),N'?'),NCHAR(20),N'?'),NCHAR(21),N'?'),NCHAR(22),N'?'),NCHAR(23),N'?'),NCHAR(24),N'?'),NCHAR(25),N'?'),NCHAR(26),N'?'),NCHAR(27),N'?'),NCHAR(28),N'?'),NCHAR(29),N'?'),NCHAR(30),N'?'),NCHAR(31),N'?') 
+		AS [text()]
+		FROM sys.dm_exec_sql_text(er.sql_handle) AS qt2
+		FOR XML PATH(''), TYPE) AS [running_statement],
+	--ot.task_state AS [status],
+	er.status, qp.query_plan, er.percent_complete,
+	(er.cpu_time/1000) AS cpu_time_sec,
+	(er.reads*8)/1024 AS physical_reads_KB,
+	(er.logical_reads*8)/1024 AS logical_reads_KB,
+	(er.writes*8)/1024 AS writes_KB,
+	(er.total_elapsed_time/1000)/60 AS elapsed_minutes,
+	er.wait_type, er.wait_resource, er.last_wait_type,
+	(SELECT CASE
+		WHEN pageid = 1 OR pageid % 8088 = 0 THEN 'Is_PFS_Page'
+		WHEN pageid = 2 OR pageid % 511232 = 0 THEN 'Is_GAM_Page'
+		WHEN pageid = 3 OR (pageid - 1) % 511232 = 0 THEN 'Is_SGAM_Page'
+		WHEN pageid IS NULL THEN NULL
+		ELSE 'Is_not_PFS_GAM_SGAM_page' END
+	FROM (SELECT CASE WHEN er.[wait_type] LIKE 'PAGE%LATCH%' AND er.[wait_resource] LIKE '%:%'
+		THEN CAST(RIGHT(er.[wait_resource], LEN(er.[wait_resource]) - CHARINDEX(':', er.[wait_resource], LEN(er.[wait_resource])-CHARINDEX(':', REVERSE(er.[wait_resource])))) AS int)
+		ELSE NULL END AS pageid) AS latch_pageid
+	) AS wait_resource_type,
+	er.wait_time AS wait_time_ms, er.cpu_time AS cpu_time_ms, er.open_transaction_count,
+	DATEADD(s, (er.estimated_completion_time/1000), GETDATE()) AS estimated_completion_time,
+	CASE WHEN mg.wait_time_ms IS NULL THEN DATEDIFF(ms, mg.request_time, mg.grant_time) ELSE mg.wait_time_ms END AS [grant_wait_time_ms],
+	LEFT (CASE COALESCE(er.transaction_isolation_level, es.transaction_isolation_level)
+		WHEN 0 THEN '0-Unspecified'
+		WHEN 1 THEN '1-ReadUncommitted'
+		WHEN 2 THEN '2-ReadCommitted'
+		WHEN 3 THEN '3-RepeatableRead'
+		WHEN 4 THEN '4-Serializable'
+		WHEN 5 THEN '5-Snapshot'
+		ELSE CONVERT (VARCHAR(30), er.transaction_isolation_level) + '-UNKNOWN'
+    END, 30) AS transaction_isolation_level,
+	mg.requested_memory_kb, mg.granted_memory_kb, mg.ideal_memory_kb, mg.query_cost,
+	((((ssu.user_objects_alloc_page_count + (SELECT SUM(tsu.user_objects_alloc_page_count) FROM sys.dm_db_task_space_usage tsu WHERE tsu.session_id = ssu.session_id)) -
+		(ssu.user_objects_dealloc_page_count + (SELECT SUM(tsu.user_objects_dealloc_page_count) FROM sys.dm_db_task_space_usage tsu WHERE tsu.session_id = ssu.session_id)))*8)/1024) AS user_obj_in_tempdb_MB,
+	((((ssu.internal_objects_alloc_page_count + (SELECT SUM(tsu.internal_objects_alloc_page_count) FROM sys.dm_db_task_space_usage tsu WHERE tsu.session_id = ssu.session_id)) -
+		(ssu.internal_objects_dealloc_page_count + (SELECT SUM(tsu.internal_objects_dealloc_page_count) FROM sys.dm_db_task_space_usage tsu WHERE tsu.session_id = ssu.session_id)))*8)/1024) AS internal_obj_in_tempdb_MB,
+	es.[host_name], es.login_name, es.[program_name], es.is_user_process, g.name AS workload_group
+FROM sys.dm_exec_requests er
+	LEFT OUTER JOIN sys.dm_exec_query_memory_grants mg ON er.session_id = mg.session_id AND er.request_id = mg.request_id
+	LEFT OUTER JOIN sys.dm_db_session_space_usage ssu ON er.session_id = ssu.session_id
+	LEFT OUTER JOIN sys.dm_exec_sessions es ON er.session_id = es.session_id
+	LEFT OUTER JOIN sys.dm_resource_governor_workload_groups g ON es.group_id = g.group_id
+	OUTER APPLY sys.dm_exec_query_plan (er.plan_handle) qp
+WHERE er.session_id <> @@SPID AND es.is_user_process = 1
+ORDER BY er.total_elapsed_time DESC, er.logical_reads DESC, [database_name], session_id
+GO
+
+-- View all tasks which are currently waiting
+--If there no taks waiting then you wont find anything....
+
+SELECT owt.session_id, owt.wait_duration_ms, owt.wait_type,
+	owt.blocking_session_id, owt.resource_description,
+	es.program_name, est.text, est.dbid, eqp.query_plan, er.database_id,
+	es.cpu_time, es.memory_usage*8 AS memory_usage_KB
+FROM sys.dm_os_waiting_tasks owt
+INNER JOIN sys.dm_exec_sessions es ON owt.session_id = es.session_id
+INNER JOIN sys.dm_exec_requests er ON es.session_id = er.session_id
+OUTER APPLY sys.dm_exec_sql_text (er.sql_handle) est
+OUTER APPLY sys.dm_exec_query_plan (er.plan_handle) eqp
+WHERE es.is_user_process = 1
+ORDER BY owt.session_id;
+GO
+
+-- View waits
+
+;WITH Waits AS
+(SELECT wait_type, wait_time_ms / 1000. AS wait_time_s,
+  signal_wait_time_ms / 1000. AS signal_wait_time_s,
+  (wait_time_ms-signal_wait_time_ms) / 1000. AS resource_wait_time_s,
+  SUM(signal_wait_time_ms) * 1.0 / SUM(wait_time_ms) * 100 AS signal_wait_pct,
+  SUM(wait_time_ms-signal_wait_time_ms) * 1.0 / SUM(wait_time_ms) * 100 AS resource_wait_pct,
+  100.0 * wait_time_ms / SUM(wait_time_ms) OVER() AS pct,
+  ROW_NUMBER() OVER(ORDER BY wait_time_ms DESC) AS rn
+  FROM sys.dm_os_wait_stats
+  WHERE wait_time_ms > 0
+  AND wait_type NOT IN ('RESOURCE_QUEUE', 'SQLTRACE_INCREMENTAL_FLUSH_SLEEP',
+  'LOGMGR_QUEUE','CHECKPOINT_QUEUE','REQUEST_FOR_DEADLOCK_SEARCH','XE_TIMER_EVENT','BROKER_TASK_STOP','CLR_MANUAL_EVENT',
+  'CLR_AUTO_EVENT','DISPATCHER_QUEUE_SEMAPHORE', 'FT_IFTS_SCHEDULER_IDLE_WAIT','BROKER_TO_FLUSH',
+  'XE_DISPATCHER_WAIT', 'XE_DISPATCHER_JOIN', 'MSQL_XP', 'WAIT_FOR_RESULTS', 'CLR_SEMAPHORE', 'LAZYWRITER_SLEEP', 'SLEEP_TASK',
+  'SLEEP_SYSTEMTASK', 'SQLTRACE_BUFFER_FLUSH', 'WAITFOR', 'BROKER_EVENTHANDLER', 'TRACEWRITE', 'FT_IFTSHC_MUTEX', 'BROKER_RECEIVE_WAITFOR', 
+  'ONDEMAND_TASK_QUEUE', 'DBMIRROR_EVENTS_QUEUE', 'DBMIRRORING_CMD', 'BROKER_TRANSMITTER', 'SQLTRACE_WAIT_ENTRIES', 'SLEEP_BPOOL_FLUSH', 'SQLTRACE_LOCK',
+  'DIRTY_PAGE_POLL', 'HADR_FILESTREAM_IOMGR_IOCOMPLETION', 'SP_SERVER_DIAGNOSTICS_SLEEP', 'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP', 
+  'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP', 'WAIT_XTP_OFFLINE_CKPT_NEW_LOG') 
+  GROUP BY wait_type, wait_time_ms, signal_wait_time_ms)
+SELECT W1.wait_type, 
+  CAST(MAX(W1.wait_time_s) AS DECIMAL(12, 2)) AS wait_time_s,
+  CAST(MAX(W1.signal_wait_time_s) AS DECIMAL(12, 2)) AS signal_wait_time_s,
+  CAST(MAX(W1.resource_wait_time_s) AS DECIMAL(12, 2)) AS resource_wait_time_s,
+  CAST(W1.pct AS DECIMAL(12, 2)) AS pct,
+  CAST(SUM(W2.pct) AS DECIMAL(12, 2)) AS overall_running_pct,
+  CAST(W1.signal_wait_pct AS DECIMAL(12, 2)) AS signal_wait_pct,
+  CAST(W1.resource_wait_pct AS DECIMAL(12, 2)) AS resource_wait_pct,
+  CASE WHEN W1.wait_type LIKE N'LCK_%' OR W1.wait_type = N'LOCK' THEN N'Lock'
+    WHEN W1.wait_type LIKE N'LATCH_%' THEN N'Latch'
+    WHEN W1.wait_type LIKE N'PAGELATCH_%' THEN N'Buffer Latch'
+    WHEN W1.wait_type LIKE N'PAGEIOLATCH_%' THEN N'Buffer IO'
+    WHEN W1.wait_type LIKE N'HADR_SYNC_COMMIT' THEN N'AlwaysOn - Secondary Synch' 
+    WHEN W1.wait_type LIKE N'HADR_%' THEN N'AlwaysOn'
+    WHEN W1.wait_type LIKE N'FFT_%' THEN N'FileTable'
+    WHEN W1.wait_type LIKE N'PREEMPTIVE_%' THEN N'External APIs or XPs'
+    WHEN W1.wait_type IN (N'IO_COMPLETION', N'ASYNC_IO_COMPLETION', /*N'HADR_FILESTREAM_IOMGR_IOCOMPLETION',*/ N'DISKIO_SUSPEND') THEN N'Other IO'
+    WHEN W1.wait_type IN(N'BACKUPIO', N'BACKUPBUFFER') THEN 'Backup IO'
+    WHEN W1.wait_type = N'THREADPOOL' THEN 'CPU - Unavailable Worker Threads'
+    WHEN W1.wait_type = N'SOS_SCHEDULER_YIELD' THEN N'CPU - Scheduler Yielding'
+    WHEN W1.wait_type IN (N'CXPACKET', N'EXCHANGE') THEN N'CPU - Parallelism'
+    WHEN W1.wait_type IN (N'LOGMGR', N'LOGBUFFER', N'LOGMGR_RESERVE_APPEND', N'LOGMGR_FLUSH', N'WRITELOG') THEN N'Logging'
+    WHEN W1.wait_type IN (N'NET_WAITFOR_PACKET',N'NETWORK_IO') THEN N'Network IO'
+    WHEN W1.wait_type = N'ASYNC_NETWORK_IO' THEN N'Client Network IO'
+    WHEN W1.wait_type IN (N'UTIL_PAGE_ALLOC',N'SOS_VIRTUALMEMORY_LOW',N'CMEMTHREAD', N'SOS_RESERVEDMEMBLOCKLIST') THEN N'Memory' 
+    WHEN W1.wait_type IN (N'RESOURCE_SEMAPHORE_SMALL_QUERY', N'RESOURCE_SEMAPHORE') THEN N'Memory - Hash or Sort'
+    WHEN W1.wait_type LIKE N'RESOURCE_SEMAPHORE_%' OR W1.wait_type LIKE N'RESOURCE_SEMAPHORE_QUERY_COMPILE' THEN N'Memory - Compilation'
+    WHEN W1.wait_type LIKE N'CLR_%' OR W1.wait_type LIKE N'SQLCLR%' THEN N'CLR'
+    WHEN W1.wait_type LIKE N'DBMIRROR%' OR W1.wait_type = N'MIRROR_SEND_MESSAGE' THEN N'Mirroring'
+WHEN W1.wait_type = N'WAIT_XTP_OFFLINE_CKPT_LOG_IO' OR W1.wait_type = N'WAIT_XTP_CKPT_CLOSE' THEN 'InMemory Logging'
+    WHEN W1.wait_type LIKE N'XACT%' OR W1.wait_type LIKE N'DTC_%' OR W1.wait_type LIKE N'TRAN_MARKLATCH_%' OR W1.wait_type LIKE N'MSQL_XACT_%' OR W1.wait_type = N'TRANSACTION_MUTEX' THEN N'Transaction'
+  --  WHEN W1.wait_type LIKE N'SLEEP_%' OR W1.wait_type IN(N'LAZYWRITER_SLEEP', N'SQLTRACE_BUFFER_FLUSH', N'WAITFOR', N'WAIT_FOR_RESULTS', N'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', N'SLEEP_TASK', N'SLEEP_SYSTEMTASK') THEN N'Sleep'
+    WHEN W1.wait_type LIKE N'FT_%' THEN N'Full Text'
+    WHEN W1.wait_type = N'REPLICA_WRITE' THEN 'Snapshots'
+    ELSE N'Other' END AS 'wait_category'
+FROM Waits AS W1
+INNER JOIN Waits AS W2
+ON W2.rn <= W1.rn
+GROUP BY W1.rn, W1.wait_type, W1.wait_time_s, W1.pct, W1.signal_wait_time_s, W1.resource_wait_time_s, W1.signal_wait_pct, W1.resource_wait_pct
+HAVING W1.wait_time_s >= 0.01 AND (SUM(W2.pct)-W1.pct) < 100  -- percentage threshold
+ORDER BY W1.rn; 
+GO
+
+-- View the head blocker session
+-- If there is no blocking then you wont find anything
+SELECT
+	-- blocked
+	es.session_id AS blocked_spid,
+	es.[status] AS [blocked_spid_status],
+	ot.task_state AS [blocked_task_status],
+	owt.wait_type AS blocked_spid_wait_type,
+	COALESCE(owt.wait_duration_ms, DATEDIFF(ms, es.last_request_start_time, GETDATE())) AS blocked_spid_wait_time_ms,
+	--er.total_elapsed_time AS blocked_elapsed_time_ms,
+	/* 
+		Check sys.dm_os_waiting_tasks for Exchange wait types in http://technet.microsoft.com/en-us/library/ms188743.aspx.
+		- Wait Resource e_waitPipeNewRow in CXPACKET waits   Producer waiting on consumer for a packet to fill.
+		- Wait Resource e_waitPipeGetRow in CXPACKET waits   Consumer waiting on producer to fill a packet.
+	*/
+	owt.resource_description AS blocked_spid_res_desc,
+	owt.[objid] AS blocked_objectid,
+	owt.pageid AS blocked_pageid,
+	CASE WHEN owt.pageid = 1 OR owt.pageid % 8088 = 0 THEN 'Is_PFS_Page'
+		WHEN owt.pageid = 2 OR owt.pageid % 511232 = 0 THEN 'Is_GAM_Page'
+		WHEN owt.pageid = 3 OR (owt.pageid - 1) % 511232 = 0 THEN 'Is_SGAM_Page'
+		WHEN owt.pageid IS NULL THEN NULL
+		ELSE 'Is_not_PFS_GAM_SGAM_page' END AS blocked_spid_res_type,
+	(SELECT qt.text AS [text()] 
+		FROM sys.dm_exec_sql_text(COALESCE(er.sql_handle, ec.most_recent_sql_handle)) AS qt 
+		FOR XML PATH(''), TYPE) AS [blocked_batch],
+	(SELECT SUBSTRING(qt2.text, 
+		(CASE WHEN er.statement_start_offset = 0 THEN 0 ELSE er.statement_start_offset/2 END),
+		(CASE WHEN er.statement_end_offset = -1 THEN DATALENGTH(qt2.text) ELSE er.statement_end_offset/2 END - (CASE WHEN er.statement_start_offset = 0 THEN 0 ELSE er.statement_start_offset/2 END))) AS [text()]
+		FROM sys.dm_exec_sql_text(COALESCE(er.sql_handle, ec.most_recent_sql_handle)) AS qt2 
+		FOR XML PATH(''), TYPE) AS [blocked_statement],
+	es.last_request_start_time AS blocked_last_start,
+	LEFT (CASE COALESCE(es.transaction_isolation_level, er.transaction_isolation_level)
+		WHEN 0 THEN '0-Unspecified' 
+		WHEN 1 THEN '1-ReadUncommitted(NOLOCK)' 
+		WHEN 2 THEN '2-ReadCommitted' 
+		WHEN 3 THEN '3-RepeatableRead' 
+		WHEN 4 THEN '4-Serializable' 
+		WHEN 5 THEN '5-Snapshot'
+		ELSE CONVERT (VARCHAR(30), COALESCE(es.transaction_isolation_level, er.transaction_isolation_level)) + '-UNKNOWN' 
+    END, 30) AS blocked_tran_isolation_level,
+
+	-- blocker
+	er.blocking_session_id As blocker_spid,
+    CASE 
+        -- session has an active request, is blocked, but is blocking others or session is idle but has an open tran and is blocking others
+        WHEN (er2.session_id IS NULL OR owt.blocking_session_id IS NULL) AND (er.blocking_session_id = 0 OR er.session_id IS NULL) THEN 1
+        -- session is either not blocking someone, or is blocking someone but is blocked by another party
+        ELSE 0
+    END AS is_head_blocker,
+	(SELECT REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+		qt2.text,
+		NCHAR(1),N'?'),NCHAR(2),N'?'),NCHAR(3),N'?'),NCHAR(4),N'?'),NCHAR(5),N'?'),NCHAR(6),N'?'),NCHAR(7),N'?'),NCHAR(8),N'?'),NCHAR(11),N'?'),NCHAR(12),N'?'),NCHAR(14),N'?'),NCHAR(15),N'?'),NCHAR(16),N'?'),NCHAR(17),N'?'),NCHAR(18),N'?'),NCHAR(19),N'?'),NCHAR(20),N'?'),NCHAR(21),N'?'),NCHAR(22),N'?'),NCHAR(23),N'?'),NCHAR(24),N'?'),NCHAR(25),N'?'),NCHAR(26),N'?'),NCHAR(27),N'?'),NCHAR(28),N'?'),NCHAR(29),N'?'),NCHAR(30),N'?'),NCHAR(31),N'?') 
+		AS [text()]
+		FROM sys.dm_exec_sql_text(COALESCE(er2.sql_handle, ec2.most_recent_sql_handle)) AS qt2 
+		FOR XML PATH(''), TYPE) AS [blocker_batch],
+	(SELECT REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+		SUBSTRING(qt2.text, 
+		(CASE WHEN er2.statement_start_offset = 0 THEN 0 ELSE er2.statement_start_offset/2 END),
+		(CASE WHEN er2.statement_end_offset = -1 THEN DATALENGTH(qt2.text) ELSE er2.statement_end_offset/2 END - (CASE WHEN er2.statement_start_offset = 0 THEN 0 ELSE er2.statement_start_offset/2 END))),
+		NCHAR(1),N'?'),NCHAR(2),N'?'),NCHAR(3),N'?'),NCHAR(4),N'?'),NCHAR(5),N'?'),NCHAR(6),N'?'),NCHAR(7),N'?'),NCHAR(8),N'?'),NCHAR(11),N'?'),NCHAR(12),N'?'),NCHAR(14),N'?'),NCHAR(15),N'?'),NCHAR(16),N'?'),NCHAR(17),N'?'),NCHAR(18),N'?'),NCHAR(19),N'?'),NCHAR(20),N'?'),NCHAR(21),N'?'),NCHAR(22),N'?'),NCHAR(23),N'?'),NCHAR(24),N'?'),NCHAR(25),N'?'),NCHAR(26),N'?'),NCHAR(27),N'?'),NCHAR(28),N'?'),NCHAR(29),N'?'),NCHAR(30),N'?'),NCHAR(31),N'?') 
+		AS [text()]
+		FROM sys.dm_exec_sql_text(COALESCE(er2.sql_handle, ec2.most_recent_sql_handle)) AS qt2 
+		FOR XML PATH(''), TYPE) AS [blocker_statement],
+	es2.last_request_start_time AS blocker_last_start,
+	LEFT (CASE COALESCE(er2.transaction_isolation_level, es.transaction_isolation_level)
+		WHEN 0 THEN '0-Unspecified' 
+		WHEN 1 THEN '1-ReadUncommitted(NOLOCK)' 
+		WHEN 2 THEN '2-ReadCommitted' 
+		WHEN 3 THEN '3-RepeatableRead' 
+		WHEN 4 THEN '4-Serializable' 
+		WHEN 5 THEN '5-Snapshot' 
+		ELSE CONVERT (VARCHAR(30), COALESCE(er2.transaction_isolation_level, es.transaction_isolation_level)) + '-UNKNOWN' 
+    END, 30) AS blocker_tran_isolation_level,
+
+	-- blocked - other data
+	DB_NAME(er.database_id) AS blocked_database, 
+	es.[host_name] AS blocked_host,
+	es.[program_name] AS blocked_program, 
+	es.login_name AS blocked_login,
+	CASE WHEN es.session_id = -2 THEN 'Orphaned_distributed_tran' 
+		WHEN es.session_id = -3 THEN 'Defered_recovery_tran' 
+		WHEN es.session_id = -4 THEN 'Unknown_tran' ELSE NULL END AS blocked_session_comment,
+	es.is_user_process AS [blocked_is_user_process],
+
+	-- blocker - other data
+	DB_NAME(er2.database_id) AS blocker_database,
+	es2.[host_name] AS blocker_host,
+	es2.[program_name] AS blocker_program,	
+	es2.login_name AS blocker_login,
+	CASE WHEN es2.session_id = -2 THEN 'Orphaned_distributed_tran' 
+		WHEN es2.session_id = -3 THEN 'Defered_recovery_tran' 
+		WHEN es2.session_id = -4 THEN 'Unknown_tran' ELSE NULL END AS blocker_session_comment,
+	es2.is_user_process AS [blocker_is_user_process]
+FROM sys.dm_exec_sessions es
+LEFT OUTER JOIN sys.dm_exec_requests er ON es.session_id = er.session_id
+LEFT OUTER JOIN sys.dm_exec_connections ec ON es.session_id = ec.session_id
+LEFT OUTER JOIN sys.dm_os_tasks ot ON er.session_id = ot.session_id AND er.request_id = ot.request_id
+LEFT OUTER JOIN sys.dm_exec_sessions es2 ON er.blocking_session_id = es2.session_id
+LEFT OUTER JOIN sys.dm_exec_requests er2 ON es2.session_id = er2.session_id
+LEFT OUTER JOIN sys.dm_exec_connections ec2 ON es2.session_id = ec2.session_id
+LEFT OUTER JOIN 
+(
+    -- In some cases (e.g. parallel queries, also waiting for a worker), one thread can be flagged as 
+    -- waiting for several different threads.  This will cause that thread to show up in multiple rows 
+    -- in our grid, which we don't want.  Use ROW_NUMBER to select the longest wait for each thread, 
+    -- and use it as representative of the other wait relationships this thread is involved in. 
+    SELECT waiting_task_address, session_id, exec_context_id, wait_duration_ms, 
+		wait_type, resource_address, blocking_task_address, blocking_session_id, 
+		blocking_exec_context_id, resource_description,
+		CASE WHEN [wait_type] LIKE 'PAGE%' AND [resource_description] LIKE '%:%' THEN CAST(RIGHT([resource_description], LEN([resource_description]) - CHARINDEX(':', [resource_description], LEN([resource_description])-CHARINDEX(':', REVERSE([resource_description])))) AS int)
+			WHEN [wait_type] LIKE 'LCK%' AND [resource_description] LIKE '%pageid%' AND ISNUMERIC(RIGHT(LEFT([resource_description],CHARINDEX('dbid=', [resource_description], CHARINDEX('pageid=', [resource_description])+6)-1),CHARINDEX('=',REVERSE(RTRIM(LEFT([resource_description],CHARINDEX('dbid=', [resource_description], CHARINDEX('pageid=', [resource_description])+6)-1)))))) = 1 THEN CAST(RIGHT(LEFT([resource_description],CHARINDEX('dbid=', [resource_description], CHARINDEX('pageid=', [resource_description])+6)-1),CHARINDEX('=',REVERSE(RTRIM(LEFT([resource_description],CHARINDEX('dbid=', [resource_description], CHARINDEX('pageid=', [resource_description])+6)-1))))) AS bigint)
+			ELSE NULL END AS pageid,
+		CASE WHEN [wait_type] LIKE 'LCK%' AND [resource_description] LIKE '%associatedObjectId%' AND ISNUMERIC(RIGHT([resource_description],CHARINDEX('=', REVERSE([resource_description]))-1)) = 1 THEN CAST(RIGHT([resource_description],CHARINDEX('=', REVERSE([resource_description]))-1) AS bigint)
+			ELSE NULL END AS [objid],
+		ROW_NUMBER() OVER (PARTITION BY waiting_task_address ORDER BY wait_duration_ms DESC) AS row_num
+    FROM sys.dm_os_waiting_tasks
+) owt ON ot.task_address = owt.waiting_task_address AND owt.row_num = 1
+--OUTER APPLY sys.dm_exec_sql_text (er.sql_handle) est
+--OUTER APPLY sys.dm_exec_query_plan (er.plan_handle) eqp
+WHERE es.session_id <> @@SPID AND es.is_user_process = 1 
+	--AND ((owt.wait_duration_ms/1000 > 5) OR (er.total_elapsed_time/1000) > 5 OR er.total_elapsed_time IS NULL) --Only report blocks > 5 Seconds plus head blocker
+	AND (es.session_id IN (SELECT er3.blocking_session_id FROM sys.dm_exec_requests er3) OR er.blocking_session_id IS NOT NULL OR er.blocking_session_id > 0)
+ORDER BY blocked_spid, is_head_blocker DESC, blocked_spid_wait_time_ms DESC, blocker_spid
+GO
+
+-- Kill the head blocker session
+--KILL 52
