@@ -12,10 +12,10 @@ Our suppliers from and against any claims or lawsuits, including attorneys fees,
 result from the use or distribution of the Sample Code.
 */
 
-USE AdventureWorks2022
+USE AdventureWorksPTO
 go
 -- db_id for AdventureWorksPTO:
-SELECT db_id('AdventureWorks2022')
+SELECT db_id('AdventureWorksPTO')
 
 -- data page Types used by the Person.Address table 
 SELECT DISTINCT Page_Type, Page_Type_Desc
