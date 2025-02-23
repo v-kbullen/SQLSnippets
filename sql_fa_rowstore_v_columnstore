@@ -1,0 +1,164 @@
+USE AdventureWorks2022
+GO
+-- create new rowstore table
+CREATE TABLE [dbo].[ExpandedSalesOrderDetail_Rowstore](
+[SalesOrderID] [int] NOT NULL,
+[SalesOrderDetailID] [int] NOT NULL,
+[CarrierTrackingNumber] [nvarchar](25) NULL,
+[OrderQty] [smallint] NOT NULL,
+[ProductID] [int] NOT NULL,
+[SpecialOfferID] [int] NOT NULL,
+[UnitPrice] [money] NOT NULL,
+[UnitPriceDiscount] [money] NOT NULL,
+[LineTotal] [numeric](38, 6) NOT NULL,
+[rowguid] [uniqueidentifier] NOT NULL,
+[ModifiedDate] [datetime] NOT NULL
+) ON [PRIMARY]
+GO
+
+-- create new columnstore table
+CREATE TABLE [dbo].[ExpandedSalesOrderDetail_Columnstore](
+[SalesOrderID] [int] NOT NULL,
+[SalesOrderDetailID] [int] NOT NULL,
+[CarrierTrackingNumber] [nvarchar](25) NULL,
+[OrderQty] [smallint] NOT NULL,
+[ProductID] [int] NOT NULL,
+[SpecialOfferID] [int] NOT NULL,
+[UnitPrice] [money] NOT NULL,
+[UnitPriceDiscount] [money] NOT NULL,
+[LineTotal] [numeric](38, 6) NOT NULL,
+[rowguid] [uniqueidentifier] NOT NULL,
+[ModifiedDate] [datetime] NOT NULL
+) ON [PRIMARY]
+GO
+
+-- create rowstore clustered index
+CREATE CLUSTERED INDEX [CL_ExpandedSalesOrderDetail_Rowstore] ON [dbo].[ExpandedSalesOrderDetail_Rowstore]
+( [SalesOrderDetailID])
+GO
+
+-- create columnstore clustered index
+CREATE CLUSTERED COLUMNSTORE INDEX CL_ExpandedSalesOrderDetail_ColumnStore ON [ExpandedSalesOrderDetail_ColumnStore]
+GO
+
+-- load sample data
+INSERT INTO [dbo].[ExpandedSalesOrderDetail_Rowstore]
+SELECT S1.*
+FROM Sales.SalesOrderDetail S1
+GO 100
+
+-- load sample data
+INSERT INTO [dbo].[ExpandedSalesOrderDetail_Columnstore]
+SELECT S1.*
+FROM Sales.SalesOrderDetail S1
+GO 100
+
+-- create rowstore non-clustered index
+CREATE NONCLUSTERED INDEX [NCI_ExpandedSalesOrderDetail_Rowstore_SalesOrderId_LineTotal]
+ON [dbo].[ExpandedSalesOrderDetail_Rowstore] ([SalesOrderID])
+INCLUDE ([LineTotal])
+GO
+
+--create columnsstore non-clustered index
+CREATE NONCLUSTERED INDEX [NCI_ExpandedSalesOrderDetail_Columnstore_SalesOrderId_LineTotal]
+ON [dbo].[ExpandedSalesOrderDetail_Columnstore] ([SalesOrderID])
+INCLUDE ([LineTotal])
+GO
+
+-- rowstore storage
+SELECT 
+    t.NAME AS TableName,
+    i.name AS IndexName,
+    SUM(a.total_pages) / 128 AS Rowstore_TotalSpaceMB
+FROM 
+    sys.tables t
+INNER JOIN sys.indexes i ON t.OBJECT_ID = i.object_id
+INNER JOIN sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
+INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
+WHERE t.NAME = 'ExpandedSalesOrderDetail_Rowstore'
+    --AND i.index_id = 1
+GROUP BY t.NAME, i.name;
+
+-- columnstore storage
+SELECT SUM(s.used_page_count) / 128 as 'Columnstore_TotalSpaceMB'
+FROM sys.indexes AS i 
+JOIN sys.dm_db_partition_stats AS S 
+ON i.object_id = S.object_id 
+and I.index_id = S.index_id 
+WHERE i.object_id = object_id('ExpandedSalesOrderDetail_ColumnStore') 
+GO
+
+-- check our columnstore rowgroups (what's the row count)
+SELECT * 
+FROM sys.column_store_row_groups 
+GO
+
+SELECT * 
+FROM sys.column_store_segments
+GO
+
+-- maintain the columnstore clustered index
+ALTER INDEX [CL_ExpandedSalesOrderDetail_ColumnStore] ON [dbo].[ExpandedSalesOrderDetail_Columnstore] 
+	REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = COLUMNSTORE)
+GO
+
+SELECT * 
+FROM sys.column_store_row_groups 
+GO
+
+SELECT * 
+FROM sys.column_store_segments
+GO
+
+SET STATISTICS TIME ON;
+SET STATISTICS IO ON;
+
+-- DEMO-1: 
+-- A simple query just on the fact table using regular clustered index
+DBCC DROPCLEANBUFFERS
+GO
+
+SELECT DISTINCT(COUNT(ProductId)) 
+FROM dbo.ExpandedSalesOrderDetail_Rowstore 
+GO
+
+-- Same query on clustered columnstore index
+DBCC DROPCLEANBUFFERS
+GO
+
+SELECT DISTINCT(COUNT(ProductId)) 
+FROM dbo.ExpandedSalesOrderDetail_ColumnStore  
+GO
+
+-- DEMO-2: 
+-- A simple two table join with a predicate and a group by clause on regular clustered index 
+DBCC DROPCLEANBUFFERS
+GO
+
+SELECT h.TerritoryID,
+       COUNT(DISTINCT h.SalesOrderID) AS NumOfSales, 
+       SUM(d.LineTotal) SalesAmount
+FROM dbo.ExpandedSalesOrderDetail_Rowstore d
+JOIN Sales.SalesOrderHeader h on h.SalesOrderID = d.SalesOrderID
+GROUP BY h.TerritoryID
+ORDER BY h.TerritoryID
+GO
+
+-- Same query on clustered ColumnStore index
+DBCC DROPCLEANBUFFERS
+GO
+
+SELECT h.TerritoryID,
+       COUNT(DISTINCT h.SalesOrderID) AS NumOfSales, 
+       SUM(d.LineTotal) SalesAmount
+FROM dbo.ExpandedSalesOrderDetail_Columnstore d
+JOIN Sales.SalesOrderHeader h on h.SalesOrderID = d.SalesOrderID
+GROUP BY h.TerritoryID
+ORDER BY h.TerritoryID
+GO
+
+-- cleanup
+DROP TABLE ExpandedSalesOrderDetail_Rowstore
+GO
+DROP TABLE ExpandedSalesOrderDetail_Columnstore
+GO
