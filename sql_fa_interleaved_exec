@@ -53,7 +53,8 @@ GO
 /*****************************************************************************/
 
 /* Create a multistatement table valued function that's going to return
-	a lot of rows */
+   a lot of rows 
+*/
 
 CREATE OR ALTER FUNCTION dbo.getPersons ()
 RETURNS @returntable TABLE ( BusinessEntityID INT, LastName NVARCHAR(25), FirstName NVARCHAR(25))
@@ -126,4 +127,5 @@ GO
 	Another indication that the Optimzer knows we're working with higher
 	row counts is the use of a Hash Match (Aggregate) operator to do the
 	DISTINCT work. This is a more efficient means of sorting large amounts
-	of data.*/
+	of data.
+*/
