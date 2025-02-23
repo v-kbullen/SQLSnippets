@@ -1,0 +1,48 @@
+--ensure that the Query Store is enabled
+ALTER DATABASE AdventureWorks2022
+SET QUERY_STORE = ON;
+GO
+
+--Enable automatic tuning options such as FORCE_LAST_GOOD_PLAN
+ALTER DATABASE AdventureWorks2022
+SET AUTOMATIC_TUNING (FORCE_LAST_GOOD_PLAN = ON);
+GO
+
+/* Creating the Stored procedure */
+CREATE OR ALTER PROCEDURE dbo.Salesinformation @productID [int]
+AS
+BEGIN
+	SELECT SalesOrderID,
+		   ProductID,
+		   OrderQty
+	FROM Sales.SalesOrderDetailEnlarged
+	WHERE ProductID = @productID;
+END;
+
+/* Clearing the Query store */
+ALTER DATABASE AdventureWorks2022 SET QUERY_STORE CLEAR
+GO
+
+/* Clean the procedure cache */
+ALTER DATABASE SCOPED CONFIGURATION CLEAR PROCEDURE_CACHE
+GO
+
+/* Creating the first workload */
+EXEC dbo.Salesinformation 942 
+GO 50
+
+/* Clean the procedure cache */
+ALTER DATABASE SCOPED CONFIGURATION CLEAR PROCEDURE_CACHE
+
+/* Creating Regression */
+EXEC dbo.Salesinformation 707 
+GO 10
+
+/* Run the workload again */
+EXEC dbo.Salesinformation 942 
+GO 30
+
+/* Check for the Automatic plan correction in the Query Store */
+/* Check for the tuning recommendations */
+SELECT *
+FROM sys.dm_db_tuning_recommendations
