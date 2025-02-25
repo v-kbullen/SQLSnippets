@@ -1,0 +1,103 @@
+/*
+THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, 
+EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS 
+FOR A PARTICULAR PURPOSE. 
+
+We grant You a nonexclusive, royalty-free right to use and modify the Sample Code and to reproduce and distribute 
+the object code form of the Sample Code, provided that You agree: ?
+(i) to not use Our name, logo, or trademarks to market Your software product in which the Sample Code is embedded; ?
+(ii) to include a valid copyright notice on Your software product in which the Sample Code is embedded; and ?
+(iii) to indemnify, hold harmless, and defend Us and Our suppliers from and against any claims or lawsuits, including attorneys’ fees, 
+that arise or result from the use or distribution of the Sample Code. ?
+Please note: None of the conditions outlined in the disclaimer above will supersede the terms and conditions 
+contained within the Premier Customer Services Description. ?
+*/
+USE master
+GO
+
+--Backup Encryption Demo
+DROP DATABASE IF EXISTS BackupEncryptionDemo;
+GO
+
+-- create database
+CREATE DATABASE BackupEncryptionDemo
+GO
+
+USE BackupEncryptionDemo;
+GO
+
+CREATE TABLE TestTable (
+    Id INT IDENTITY(1,1) PRIMARY KEY,
+    [Data] NVARCHAR(50)
+);
+
+INSERT INTO TestTable (Data) VALUES ('SampleData1'), ('SampleData2');
+GO
+
+USE master
+GO
+
+--The first step is to create a Database Master Key. 
+--This can only be performed once per sql instance
+IF NOT EXISTS (SELECT * 
+               FROM sys.symmetric_keys 
+	           WHERE symmetric_key_id = 101)
+BEGIN
+	CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'SQL$ecurity3SQL$ecurity3';
+	PRINT 'Database Master Key Created'
+END
+ELSE
+BEGIN
+	PRINT 'Database Master Key Already Exists'
+END
+GO
+
+--create the backup cert
+IF NOT EXISTS (SELECT * 
+               FROM sys.certificates 
+	           WHERE name = 'BackupCert8675309')
+BEGIN
+	CREATE CERTIFICATE BackupCert8675309 WITH SUBJECT = 'Certificate for TDE - tdedb'
+	PRINT 'Certificate BackupCert8675309 Created'
+END
+ELSE
+BEGIN
+	PRINT 'Certificate BackupCert8675309 Already Exists'
+END
+GO
+
+-- back up the certificate and its private key
+BACKUP CERTIFICATE BackupCert8675309
+TO FILE = 'C:\Temp\BackupCert8675309.cer'
+WITH PRIVATE KEY (
+    FILE = 'C:\Temp\BackupCert8675309_PrivateKey.pvk',
+    ENCRYPTION BY PASSWORD = 'AnotherStrongPassword123!'
+);
+
+-- use the certificate to create an encrypted backup of the database
+BACKUP DATABASE BackupEncryptionDemo
+TO DISK = 'C:\Temp\BackupEncryptionDemo.bak'
+WITH ENCRYPTION (
+    ALGORITHM = AES_256,
+    SERVER CERTIFICATE = BackupCert8675309
+);
+
+/*
+--restore everything (database master key, cert only if needed)
+USE master;
+GO
+
+CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'YourStrongPassword123!';
+GO
+
+CREATE CERTIFICATE BackupCert8675309
+FROM FILE = 'C:\Temp\BackupCert8675309.cer'
+WITH PRIVATE KEY (
+    FILE = 'C:\Temp\BackupCert8675309_PrivateKey.pvk',
+    DECRYPTION BY PASSWORD = 'AnotherStrongPassword123!'
+);
+GO
+
+RESTORE DATABASE BackupEncryptionDemo
+FROM DISK = 'C:\Temp\BackupEncryptionDemo.bak';
+*/
