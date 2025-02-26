@@ -86,7 +86,7 @@ BEGIN
 END;
 GO
 
-:Connect SQLN2\SQL2022
+:Connect SQLN1\SQL2022
 USE [master]
 GO
 
@@ -103,18 +103,18 @@ REPLICA ON N'SQLN1\SQL2022' WITH (ENDPOINT_URL = N'TCP://sqln1.corpnet.contoso.c
 
 GO
 
-:Connect SQLN2\SQL2022
+:Connect SQLN1\SQL2022
 USE [master]
 GO
 
 IF NOT EXISTS (SELECT * FROM sys.availability_group_listeners WHERE dns_name = 'conaglist1')
 BEGIN
 	ALTER AVAILABILITY GROUP [conag1]
-	ADD LISTENER N'conaglist1' (WITH DHCP ((N'192.168.1.0', N'255.255.255.0')), PORT=1433);
+	ADD LISTENER N'conaglist1' (WITH DHCP ON (N'192.168.1.0', N'255.255.255.0'), PORT=1433);
 END;
 GO
 
-:Connect SQLN1\SQL2022
+:Connect SQLN2\SQL2022
 ALTER AVAILABILITY GROUP [conag1] JOIN;
 GO
 
