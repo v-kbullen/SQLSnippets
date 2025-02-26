@@ -1,0 +1,10 @@
+:Connect conaglist1
+GO
+
+USE [master]
+GO
+CREATE LOGIN [ContainedSQLLogin] WITH PASSWORD=N'MySecurePassword99!!', 
+	DEFAULT_DATABASE=[master], CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF
+GO
+ALTER SERVER ROLE [sysadmin] ADD MEMBER [ContainedSQLLogin]
+GO
