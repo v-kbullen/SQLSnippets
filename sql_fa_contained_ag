@@ -40,7 +40,7 @@ BEGIN
 END;
 GO
 
-GRANT CONNECT ON ENDPOINT::[Hadr_endpoint] TO [sqllab\sql_service];
+GRANT CONNECT ON ENDPOINT::[Hadr_endpoint] TO [corpnet\sqlsvc];
 GO
 
 :Connect SQLN1\SQL2022
@@ -71,7 +71,7 @@ BEGIN
 END;
 GO
 
-GRANT CONNECT ON ENDPOINT::[Hadr_endpoint] TO [sqllab\sql_service];
+GRANT CONNECT ON ENDPOINT::[Hadr_endpoint] TO [corpnet\sqlsvc];
 GO
 
 :Connect SQLN2\SQL2022
