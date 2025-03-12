@@ -11,6 +11,11 @@ Please note: None of the conditions outlined in the disclaimer above will superc
 
 USE AdventureWorks2022
 GO
+
+DROP TABLE IF EXISTS [dbo].[ExpandedSalesOrderDetail_Rowstore];
+DROP TABLE IF EXISTS [dbo].[ExpandedSalesOrderDetail_Columnstore];
+GO
+
 -- create new rowstore table
 CREATE TABLE [dbo].[ExpandedSalesOrderDetail_Rowstore](
 [SalesOrderID] [int] NOT NULL,
@@ -52,29 +57,33 @@ GO
 CREATE CLUSTERED COLUMNSTORE INDEX CL_ExpandedSalesOrderDetail_ColumnStore ON [ExpandedSalesOrderDetail_ColumnStore]
 GO
 
--- load sample data
+-- load sample data into the rowstore table
 INSERT INTO [dbo].[ExpandedSalesOrderDetail_Rowstore]
 SELECT S1.*
 FROM Sales.SalesOrderDetail S1
-GO 100
+GO 100 --note we're loading 100 batches
 
--- load sample data
+-- load sample data into the columnstore table
 INSERT INTO [dbo].[ExpandedSalesOrderDetail_Columnstore]
 SELECT S1.*
 FROM Sales.SalesOrderDetail S1
-GO 100
+GO 100 --note we're loading 100 batches
 
--- create rowstore non-clustered index
+-- create rowstore non-clustered index on rowstore table
 CREATE NONCLUSTERED INDEX [NCI_ExpandedSalesOrderDetail_Rowstore_SalesOrderId_LineTotal]
 ON [dbo].[ExpandedSalesOrderDetail_Rowstore] ([SalesOrderID])
 INCLUDE ([LineTotal])
 GO
 
---create columnsstore non-clustered index
+--create non-clustered index on columnstore table
 CREATE NONCLUSTERED INDEX [NCI_ExpandedSalesOrderDetail_Columnstore_SalesOrderId_LineTotal]
 ON [dbo].[ExpandedSalesOrderDetail_Columnstore] ([SalesOrderID])
 INCLUDE ([LineTotal])
 GO
+
+--notes
+-- columnstore storage is more efficient (compression on column values 
+-- is greater than compression on rows)
 
 -- rowstore storage
 SELECT 
@@ -100,10 +109,26 @@ WHERE i.object_id = object_id('ExpandedSalesOrderDetail_ColumnStore')
 GO
 
 -- check our columnstore rowgroups (what's the row count)
+
+--notice:
+-- 1. the total_rows from each rowgroup is 121317 
+--    (or the number of rows Sales.SalesOrderDetail used to populate the table)
+--    this is greater than the 102,400 rows needed to move the data directly
+--    into a compressed row group.
+-- 2. we have 100 row groups, we had 100 batches
 SELECT * 
 FROM sys.column_store_row_groups 
 GO
 
+--notice:
+-- 1. the total_rows from each rowgroup is 121317 
+--    (or the number of rows Sales.SalesOrderDetail used to populate the table)
+--    this is greater than the 102,400 rows needed to move the data directly
+--    into a compressed row group.
+-- 2. we have 1200 row groups, we had 100 batches * 11 columns + 100 column_store_segments where the column_id = 65535 
+--    that indicates the deleted bitmap for a rowgroup. 
+--    this bitmap keeps track of rows that have been logically deleted 
+--    but not yet physically removed from the columnstore index.
 SELECT * 
 FROM sys.column_store_segments
 GO
@@ -113,10 +138,12 @@ ALTER INDEX [CL_ExpandedSalesOrderDetail_ColumnStore] ON [dbo].[ExpandedSalesOrd
 	REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = COLUMNSTORE)
 GO
 
+--check the column_store_row_groups counts again, they should be closer to the 1048576 rows max
 SELECT * 
 FROM sys.column_store_row_groups 
 GO
 
+--check the column_store_segments counts again, they should be closer to the 1048576 rows max
 SELECT * 
 FROM sys.column_store_segments
 GO
@@ -132,6 +159,9 @@ GO
 SELECT DISTINCT(COUNT(ProductId)) 
 FROM dbo.ExpandedSalesOrderDetail_Rowstore 
 GO
+--note the execution time
+-- SQL Server Execution Times:
+--   CPU time = 1999 ms,  elapsed time = 333 ms.
 
 -- Same query on clustered columnstore index
 DBCC DROPCLEANBUFFERS
@@ -140,6 +170,9 @@ GO
 SELECT DISTINCT(COUNT(ProductId)) 
 FROM dbo.ExpandedSalesOrderDetail_ColumnStore  
 GO
+--note the execution time
+-- SQL Server Execution Times:
+--   CPU time = 0 ms,  elapsed time = 4 ms.
 
 -- DEMO-2: 
 -- A simple two table join with a predicate and a group by clause on regular clustered index 
@@ -154,6 +187,9 @@ JOIN Sales.SalesOrderHeader h on h.SalesOrderID = d.SalesOrderID
 GROUP BY h.TerritoryID
 ORDER BY h.TerritoryID
 GO
+--note the execution time
+ --SQL Server Execution Times:
+--   CPU time = 3032 ms,  elapsed time = 3148 ms. (no parallelism)
 
 -- Same query on clustered ColumnStore index
 DBCC DROPCLEANBUFFERS
@@ -167,6 +203,9 @@ JOIN Sales.SalesOrderHeader h on h.SalesOrderID = d.SalesOrderID
 GROUP BY h.TerritoryID
 ORDER BY h.TerritoryID
 GO
+--note the execution time
+-- SQL Server Execution Times:
+--   CPU time = 923 ms,  elapsed time = 167 ms. (parallelism)
 
 -- cleanup (leave if using query tuning demo)
 DROP TABLE ExpandedSalesOrderDetail_Rowstore
