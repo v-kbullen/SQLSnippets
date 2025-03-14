@@ -13,11 +13,30 @@ USE AdventureWorks2022
 GO
 
 DROP TABLE IF EXISTS [dbo].[ExpandedSalesOrderDetail_Rowstore];
+DROP TABLE IF EXISTS [dbo].[ExpandedSalesOrderDetail_Rowstore_Compressed];
 DROP TABLE IF EXISTS [dbo].[ExpandedSalesOrderDetail_Columnstore];
 GO
 
 -- create new rowstore table
 CREATE TABLE [dbo].[ExpandedSalesOrderDetail_Rowstore](
+[Id] [int] identity(1,1) primary key nonclustered,
+[SalesOrderID] [int] NOT NULL,
+[SalesOrderDetailID] [int] NOT NULL,
+[CarrierTrackingNumber] [nvarchar](25) NULL,
+[OrderQty] [smallint] NOT NULL,
+[ProductID] [int] NOT NULL,
+[SpecialOfferID] [int] NOT NULL,
+[UnitPrice] [money] NOT NULL,
+[UnitPriceDiscount] [money] NOT NULL,
+[LineTotal] [numeric](38, 6) NOT NULL,
+[rowguid] [uniqueidentifier] NOT NULL,
+[ModifiedDate] [datetime] NOT NULL
+) ON [PRIMARY]
+GO
+
+-- create new rowstore compressed table
+CREATE TABLE [dbo].[ExpandedSalesOrderDetail_Rowstore_Compressed](
+[Id] [int] identity(1,1) primary key nonclustered,
 [SalesOrderID] [int] NOT NULL,
 [SalesOrderDetailID] [int] NOT NULL,
 [CarrierTrackingNumber] [nvarchar](25) NULL,
@@ -34,6 +53,7 @@ GO
 
 -- create new columnstore table
 CREATE TABLE [dbo].[ExpandedSalesOrderDetail_Columnstore](
+[Id] [int] identity(1,1) primary key nonclustered,
 [SalesOrderID] [int] NOT NULL,
 [SalesOrderDetailID] [int] NOT NULL,
 [CarrierTrackingNumber] [nvarchar](25) NULL,
@@ -50,7 +70,12 @@ GO
 
 -- create rowstore clustered index
 CREATE CLUSTERED INDEX [CL_ExpandedSalesOrderDetail_Rowstore] ON [dbo].[ExpandedSalesOrderDetail_Rowstore]
-( [SalesOrderDetailID])
+([SalesOrderID],[SalesOrderDetailID])
+GO
+
+-- create rowstore compressed clustered index
+CREATE CLUSTERED INDEX [CL_ExpandedSalesOrderDetail_Rowstore_Compressed] ON [dbo].[ExpandedSalesOrderDetail_Rowstore_Compressed]
+([SalesOrderID],[SalesOrderDetailID])
 GO
 
 -- create columnstore clustered index
@@ -63,11 +88,24 @@ SELECT S1.*
 FROM Sales.SalesOrderDetail S1
 GO 100 --note we're loading 100 batches
 
--- load sample data into the columnstore table
-INSERT INTO [dbo].[ExpandedSalesOrderDetail_Columnstore]
+-- load sample data into the rowstore table
+INSERT INTO [dbo].[ExpandedSalesOrderDetail_Rowstore_Compressed]
 SELECT S1.*
 FROM Sales.SalesOrderDetail S1
 GO 100 --note we're loading 100 batches
+
+-- load sample data into the columnstore table
+INSERT INTO [dbo].[ExpandedSalesOrderDetail_Columnstore]
+SELECT TOP 1000 S1.*
+FROM Sales.SalesOrderDetail S1
+GO 100 --note we're loading 100 batches
+
+--compress the rowstore compressed table
+ALTER TABLE [dbo].[ExpandedSalesOrderDetail_Rowstore_Compressed] REBUILD PARTITION = ALL
+WITH
+(DATA_COMPRESSION = PAGE
+)
+GO
 
 -- create rowstore non-clustered index on rowstore table
 CREATE NONCLUSTERED INDEX [NCI_ExpandedSalesOrderDetail_Rowstore_SalesOrderId_LineTotal]
@@ -75,10 +113,28 @@ ON [dbo].[ExpandedSalesOrderDetail_Rowstore] ([SalesOrderID])
 INCLUDE ([LineTotal])
 GO
 
+CREATE NONCLUSTERED INDEX [NCI_ExpandedSalesOrderDetail_Rowstore_ProductId] 
+ON [dbo].[ExpandedSalesOrderDetail_Rowstore] ([ProductID])
+GO
+
+-- create rowstore compressed non-clustered index on rowstore table
+CREATE NONCLUSTERED INDEX [NCI_ExpandedSalesOrderDetail_Rowstore_Compressed_SalesOrderId_LineTotal]
+ON [dbo].[ExpandedSalesOrderDetail_Rowstore_Compressed] ([SalesOrderID])
+INCLUDE ([LineTotal])
+GO
+
+CREATE NONCLUSTERED INDEX [NCI_ExpandedSalesOrderDetail_Rowstore_Compressed_ProductId] 
+ON [dbo].[ExpandedSalesOrderDetail_Rowstore_Compressed] ([ProductID])
+GO
+
 --create non-clustered index on columnstore table
 CREATE NONCLUSTERED INDEX [NCI_ExpandedSalesOrderDetail_Columnstore_SalesOrderId_LineTotal]
 ON [dbo].[ExpandedSalesOrderDetail_Columnstore] ([SalesOrderID])
 INCLUDE ([LineTotal])
+GO
+
+CREATE NONCLUSTERED INDEX [NCI_ExpandedSalesOrderDetail_Columnstore_ProductId] 
+ON [dbo].[ExpandedSalesOrderDetail_Columnstore] ([ProductID])
 GO
 
 --notes
@@ -89,7 +145,7 @@ GO
 SELECT 
     t.NAME AS TableName,
     i.name AS IndexName,
-    SUM(a.total_pages) / 128 AS Rowstore_TotalSpaceMB
+    SUM(a.total_pages) / 128 AS TotalSpaceMB
 FROM 
     sys.tables t
 INNER JOIN sys.indexes i ON t.OBJECT_ID = i.object_id
@@ -99,14 +155,33 @@ WHERE t.NAME = 'ExpandedSalesOrderDetail_Rowstore'
     --AND i.index_id = 1
 GROUP BY t.NAME, i.name;
 
+-- rowstore compressed storage
+SELECT 
+    t.NAME AS TableName,
+    i.name AS IndexName,
+    SUM(a.total_pages) / 128 AS TotalSpaceMB
+FROM 
+    sys.tables t
+INNER JOIN sys.indexes i ON t.OBJECT_ID = i.object_id
+INNER JOIN sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
+INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
+WHERE t.NAME = 'ExpandedSalesOrderDetail_Rowstore_Compressed'
+    --AND i.index_id = 1
+GROUP BY t.NAME, i.name;
+
 -- columnstore storage
-SELECT SUM(s.used_page_count) / 128 as 'Columnstore_TotalSpaceMB'
-FROM sys.indexes AS i 
-JOIN sys.dm_db_partition_stats AS S 
-ON i.object_id = S.object_id 
-and I.index_id = S.index_id 
-WHERE i.object_id = object_id('ExpandedSalesOrderDetail_ColumnStore') 
-GO
+SELECT 
+    t.NAME AS TableName,
+    i.name AS IndexName,
+    SUM(a.total_pages) / 128 AS TotalSpaceMB
+FROM 
+    sys.tables t
+INNER JOIN sys.indexes i ON t.OBJECT_ID = i.object_id
+INNER JOIN sys.partitions p ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
+INNER JOIN sys.allocation_units a ON p.partition_id = a.container_id
+WHERE t.NAME = 'ExpandedSalesOrderDetail_ColumnStore'
+    --AND i.index_id = 1
+GROUP BY t.NAME, i.name;
 
 -- check our columnstore rowgroups (what's the row count)
 
@@ -118,6 +193,7 @@ GO
 -- 2. we have 100 row groups, we had 100 batches
 SELECT * 
 FROM sys.column_store_row_groups 
+ORDER BY row_group_id
 GO
 
 --notice:
@@ -131,6 +207,7 @@ GO
 --    but not yet physically removed from the columnstore index.
 SELECT * 
 FROM sys.column_store_segments
+ORDER BY column_id, segment_id
 GO
 
 -- maintain the columnstore clustered index
@@ -140,12 +217,14 @@ GO
 
 --check the column_store_row_groups counts again, they should be closer to the 1048576 rows max
 SELECT * 
-FROM sys.column_store_row_groups 
+FROM sys.column_store_row_groups
+ORDER BY row_group_id
 GO
 
 --check the column_store_segments counts again, they should be closer to the 1048576 rows max
 SELECT * 
 FROM sys.column_store_segments
+ORDER BY column_id, segment_id
 GO
 
 SET STATISTICS TIME ON;
@@ -156,23 +235,33 @@ SET STATISTICS IO ON;
 DBCC DROPCLEANBUFFERS
 GO
 
-SELECT DISTINCT(COUNT(ProductId)) 
+SELECT COUNT(DISTINCT(ProductId))
 FROM dbo.ExpandedSalesOrderDetail_Rowstore 
 GO
 --note the execution time
 -- SQL Server Execution Times:
---   CPU time = 1999 ms,  elapsed time = 333 ms.
+--   CPU time = 2704 ms,  elapsed time = 472 ms.
+
+DBCC DROPCLEANBUFFERS
+GO
+
+SELECT COUNT(DISTINCT(ProductId))
+FROM dbo.ExpandedSalesOrderDetail_Rowstore_Compressed 
+GO
+--note the execution time
+-- SQL Server Execution Times:
+--   CPU time = 2955 ms,  elapsed time = 432 ms.
 
 -- Same query on clustered columnstore index
 DBCC DROPCLEANBUFFERS
 GO
 
-SELECT DISTINCT(COUNT(ProductId)) 
+SELECT COUNT(DISTINCT(ProductId))
 FROM dbo.ExpandedSalesOrderDetail_ColumnStore  
 GO
 --note the execution time
 -- SQL Server Execution Times:
---   CPU time = 0 ms,  elapsed time = 4 ms.
+--   CPU time = 79 ms,  elapsed time = 94 ms.
 
 -- DEMO-2: 
 -- A simple two table join with a predicate and a group by clause on regular clustered index 
