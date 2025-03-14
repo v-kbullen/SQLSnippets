@@ -96,7 +96,7 @@ GO 100 --note we're loading 100 batches
 
 -- load sample data into the columnstore table
 INSERT INTO [dbo].[ExpandedSalesOrderDetail_Columnstore]
-SELECT TOP 1000 S1.*
+SELECT S1.*
 FROM Sales.SalesOrderDetail S1
 GO 100 --note we're loading 100 batches
 
