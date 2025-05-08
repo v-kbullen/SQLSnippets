@@ -1,0 +1,295 @@
+/* 
+	Change Tracking is a lightweight means of tracking which rows in user tables
+	have been modified (inserted, updated or deleted).
+
+	https://learn.microsoft.com/en-us/sql/relational-databases/track-changes/about-change-tracking-sql-server
+		
+	The cost is kept low (about that of an additional index) by recording only
+	the primary key value(s) for the row that changed, the type of operation 
+	(insert, update, delete) and a version number associated with the transaction 
+	that changed it.  You can optionally track which columns were affected.
+
+	The version number increments for each committed transaction that changes
+	data in tracked tables.  If a row is updated a second time, only it's version
+	number is updated.  An individual version number may appear in multiple tables
+	if a single transaction updated rows in in multiple tracked tables.
+
+	A typical use of Change Tracking would be to periodically sync the database
+	with another data source that has no, or only occasional, connectivity to the
+	tracked database.  Current row data are obtained by joining ChangeTracking 
+	tables to thier source tables. 
+
+	Let's see how it works...	
+*/
+
+/******************************************************************************/	
+-- Setup...
+SET NOCOUNT ON;
+USE master; 
+
+DROP DATABASE IF EXISTS ChangeTracking;
+GO
+
+CREATE DATABASE ChangeTracking;
+GO
+
+-- allow Snapshot Isolation for the database (this can be left ON)
+ALTER DATABASE ChangeTracking SET ALLOW_SNAPSHOT_ISOLATION ON;
+GO
+
+-- Create and populate a test table
+-- Tracked tables *must* have a primary key
+USE ChangeTracking;
+GO
+
+CREATE TABLE dbo.Inventory (
+	InventoryId INT IDENTITY,
+	ItemName VARCHAR(20),
+	ItemCount INT,
+	ReorderPoint INT,
+	DateModified DATETIME2(0) DEFAULT GETDATE(),
+	CONSTRAINT PK_Inventory PRIMARY KEY CLUSTERED (InventoryId)
+);
+GO
+
+INSERT  INTO dbo.Inventory ( ItemName, ItemCount, ReorderPoint )
+VALUES  ( 'villouslou', 211, 3 ), ( 'scharri', 275, 89 ), ( 'mateboar', 209, 141 ),
+        ( 'burlemso', 955, 35 ), ( 'chinctin', 354, 48 ), ( 'ationse', 983, 9 ),
+        ( 'digrate', 360, 72 ), ( 'swammatin', 165, 59 ), ( 'waitaxon', 856, 48 ),
+        ( 'heringrame', 736, 5 ), ( 'joictivel', 899, 118 ), ( 'rotank', 299, 33 ),
+        ( 'gative', 782, 50 ), ( 'tervivel', 86, 89 ), ( 'notena', 412, 41 ),
+        ( 'haulincla', 228, 127 ), ( 'trand', 546, 172 ), ( 'hizantur', 65, 109 ),
+        ( 'schwes', 111, 55 ), ( 'piridgern', 528, 171 );
+GO
+
+CREATE TABLE dbo.Inventory2 (
+	InventoryId BIGINT IDENTITY,
+	ItemName VARCHAR(20),
+	ItemCount INT,
+	ReorderPoint INT,
+	DateModified DATETIME2(0) DEFAULT GETDATE(),
+	CONSTRAINT PK_Inventory2 PRIMARY KEY CLUSTERED (InventoryId)
+);
+GO
+
+--control table
+DECLARE @CurrentCTVersion BIGINT;
+DROP TABLE IF EXISTS dbo.ChangeTrackingMetaData;
+CREATE TABLE dbo.ChangeTrackingMetaData (TabName sysname, LastCTVersion INT);
+SELECT @CurrentCTVersion = CHANGE_TRACKING_CURRENT_VERSION();
+INSERT INTO dbo.ChangeTrackingMetaData (TabName, LastCTVersion) VALUES ('dbo.Inventory', COALESCE(@CurrentCTVersion,0));
+
+/******************************************************************************/	
+-- Enable on Change Tracking...
+
+-- First for the database
+ALTER DATABASE ChangeTracking
+SET CHANGE_TRACKING = ON 
+(CHANGE_RETENTION = 3 DAYS, AUTO_CLEANUP = ON);
+GO
+/*
+	Retention time can be set in minutes, hours or days.  
+	Auto Cleanup will delete tracking data older than Change Retention.  It can
+	be temporarily disabled if, for example, you're having difficulties sync'ing 
+	with a remote server and don't want to lose needed data.
+*/
+
+-- Then for each table we want to track
+ALTER TABLE dbo.Inventory 
+ENABLE CHANGE_TRACKING 
+WITH (TRACK_COLUMNS_UPDATED = ON);
+GO
+/* 
+	Column tracking is off by default.  Enabling it adds to the cost of tracking.
+
+	To disable Change Tracking first disable it for the table(s) then for the
+	database:
+	
+	ALTER TABLE dbo.Inventory DISABLE CHANGE_TRACKING;
+	ALTER DATABASE Alterations SET CHANGE_TRACKING = OFF;
+*/
+
+/******************************************************************************/	
+--initial load via looping
+DECLARE @MinID INT, @MaxID INT, @BatchSize INT, @CurrentID INT;
+
+-- Set the batch size
+SET @BatchSize = 5;
+
+-- Get the minimum and maximum values of the primary key
+SELECT @MinID = MIN(InventoryId), 
+       @MaxID = MAX(InventoryId) 
+FROM dbo.Inventory;
+
+-- Initialize the current ID to the minimum ID
+SET @CurrentID = @MinID;
+
+--enable identity insert
+SET IDENTITY_INSERT dbo.Inventory2 ON;
+
+-- Loop to insert records in batches of x
+WHILE @CurrentID <= @MaxID
+BEGIN
+    -- Insert records from SourceTable to DestinationTable in batches of x
+	INSERT INTO dbo.Inventory2 WITH (TABLOCK)
+		   (InventoryId,ItemName,ItemCount,ReorderPoint,DateModified)
+	SELECT c.InventoryId,c.ItemName,c.ItemCount,c.ReorderPoint,c.DateModified
+   	FROM dbo.Inventory c
+    --obtain data for an initial synchronization of the table data
+	CROSS APPLY CHANGETABLE(VERSION dbo.Inventory, (InventoryId), (c.InventoryId)) AS ct
+	WHERE c.InventoryId BETWEEN @CurrentID AND @CurrentID + @BatchSize - 1;
+
+    -- Update the current ID to the next batch start
+    SET @CurrentID = @CurrentID + @BatchSize;
+END;
+
+--disable identity insert
+SET IDENTITY_INSERT dbo.Inventory2 OFF;
+GO
+
+/******************************************************************************/
+--make some data modifications
+UPDATE dbo.Inventory SET ItemName = REVERSE(ItemName) WHERE InventoryId = 10;
+UPDATE dbo.Inventory SET ItemCount -= 5 WHERE InventoryId % 4 = 0;
+UPDATE dbo.Inventory SET ReorderPoint *= 1.03 WHERE InventoryId % 5 = 0;
+INSERT  INTO dbo.Inventory ( ItemName, ItemCount, ReorderPoint )
+VALUES  ( 'lou', 311, 3 ), ( 'arri', 75, 89 ), ( 'boar', 109, 141 )
+DELETE FROM dbo.Inventory WHERE ReorderPoint > 150;
+GO
+
+/******************************************************************************/
+--view the changes
+DECLARE @synchronization_version BIGINT;
+DECLARE @last_synchronization_version BIGINT;
+
+--obtain the current synchronization version. 
+--this will be used next time that changes are obtained.
+SET @synchronization_version = CHANGE_TRACKING_CURRENT_VERSION();
+
+--get the last synchronization version
+SELECT @last_synchronization_version = LastCTVersion
+FROM dbo.ChangeTrackingMetaData 
+WHERE TabName = 'dbo.Inventory'
+PRINT @synchronization_version
+PRINT @last_synchronization_version
+
+IF @synchronization_version > @last_synchronization_version
+BEGIN
+	BEGIN TRAN
+	--inserts
+	SELECT ct.SYS_CHANGE_VERSION,
+	       ct.SYS_CHANGE_OPERATION,
+		   c.InventoryId
+	FROM
+		dbo.Inventory AS c
+	JOIN CHANGETABLE(CHANGES dbo.Inventory, @last_synchronization_version) AS ct
+	ON c.InventoryId = ct.InventoryId
+	WHERE ct.SYS_CHANGE_OPERATION = 'I'	
+
+	--updates
+	SELECT ct.SYS_CHANGE_VERSION,
+	       ct.SYS_CHANGE_OPERATION,
+		   c.InventoryId
+	FROM
+		dbo.Inventory AS c
+	JOIN CHANGETABLE(CHANGES dbo.Inventory, @last_synchronization_version) AS ct
+	ON c.InventoryId = ct.InventoryId
+	WHERE ct.SYS_CHANGE_OPERATION = 'U';
+
+	--deletes
+	SELECT ct.SYS_CHANGE_VERSION,
+	       ct.SYS_CHANGE_OPERATION,
+		   c.InventoryId
+	FROM
+		dbo.Inventory AS c
+	RIGHT OUTER JOIN CHANGETABLE(CHANGES dbo.Inventory, @last_synchronization_version) AS ct
+	ON c.InventoryId = ct.InventoryId
+	WHERE ct.SYS_CHANGE_OPERATION = 'D';
+
+	COMMIT TRAN
+END
+ELSE
+	PRINT 'No Work To Do';
+
+/******************************************************************************/
+--incremental process
+DECLARE @synchronization_version BIGINT, @last_synchronization_version BIGINT;
+
+--obtain the current synchronization version. 
+--this will be used next time that changes are obtained.
+SET @synchronization_version = CHANGE_TRACKING_CURRENT_VERSION();
+PRINT @synchronization_version
+
+--get the last synchronization version
+SELECT @last_synchronization_version = LastCTVersion
+FROM dbo.ChangeTrackingMetaData 
+WHERE TabName = 'dbo.Inventory'
+
+--enable Snapshot Isolation on a per-session level
+SET TRAN ISOLATION LEVEL SNAPSHOT;
+
+IF @synchronization_version > @last_synchronization_version
+BEGIN
+	BEGIN TRAN
+	--inserts
+	SET IDENTITY_INSERT dbo.Inventory2 ON;
+	INSERT INTO dbo.Inventory2 WITH (TABLOCK)
+		(InventoryId,ItemName,ItemCount,ReorderPoint,DateModified)
+	SELECT c.InventoryId,c.ItemName,c.ItemCount,c.ReorderPoint,c.DateModified
+	FROM dbo.Inventory AS C
+	JOIN CHANGETABLE(CHANGES dbo.Inventory, @last_synchronization_version) AS CT
+	ON C.InventoryId = CT.InventoryId
+	WHERE CT.SYS_CHANGE_OPERATION = 'I'	
+	SET IDENTITY_INSERT dbo.Inventory2 OFF;
+
+	--updates
+	UPDATE c2
+	   SET ItemName = c1.ItemName,
+		   ItemCount = c1.ItemCount,
+		   ReorderPoint = c1.ReorderPoint,
+		   DateModified = c1.DateModified
+	FROM dbo.Inventory2 AS c2 
+	JOIN dbo.Inventory c1 on c1.InventoryId = c2.InventoryId
+	JOIN CHANGETABLE(CHANGES dbo.Inventory, @last_synchronization_version) AS ct ON c1.InventoryId = ct.InventoryId
+	WHERE CT.SYS_CHANGE_OPERATION = 'U';
+
+	--deletes (outer join needed for deleted rows)
+	DELETE FROM dbo.Inventory2
+	FROM dbo.Inventory2 c
+	RIGHT OUTER JOIN CHANGETABLE(CHANGES dbo.Inventory, @last_synchronization_version) AS CT
+	ON c.InventoryId = CT.InventoryId
+	WHERE CT.SYS_CHANGE_OPERATION = 'D';
+
+	UPDATE dbo.ChangeTrackingMetaData
+	SET LastCTVersion = @synchronization_version
+	WHERE TabName = 'dbo.Inventory';
+	
+	COMMIT TRAN
+END
+ELSE
+	PRINT 'No Work To Do';
+
+-- Revert to the default isolation level
+SET TRAN ISOLATION LEVEL READ COMMITTED;
+GO
+
+/******************************************************************************/
+--compare the table results
+SELECT InventoryId,ItemName,ItemCount,ReorderPoint,DateModified
+FROM dbo.Inventory
+EXCEPT
+SELECT InventoryId,ItemName,ItemCount,ReorderPoint,DateModified
+FROM dbo.Inventory2
+
+SELECT InventoryId,ItemName,ItemCount,ReorderPoint,DateModified
+FROM dbo.Inventory2
+EXCEPT
+SELECT InventoryId,ItemName,ItemCount,ReorderPoint,DateModified
+FROM dbo.Inventory
+
+/******************************************************************************/
+-- Clean up
+USE master;
+ALTER DATABASE ChangeTracking SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+DROP DATABASE ChangeTracking;
+GO
