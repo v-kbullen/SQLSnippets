@@ -1,0 +1,342 @@
+/* 
+	Change Tracking is a lightweight means of tracking which rows in user tables
+	have been modified (inserted, updated or deleted).
+
+	https://learn.microsoft.com/en-us/sql/relational-databases/track-changes/about-change-tracking-sql-server
+		
+	The cost is kept low (about that of an additional index) by recording only
+	the primary key value(s) for the row that changed, the type of operation 
+	(insert, update, delete) and a version number associated with the transaction 
+	that changed it.  You can optionally track which columns were affected.
+
+	The version number increments for each committed transaction that changes
+	data in tracked tables.  If a row is updated a second time, only it's version
+	number is updated.  An individual version number may appear in multiple tables
+	if a single transaction updated rows in in multiple tracked tables.
+
+	A typical use of Change Tracking would be to periodically sync the database
+	with another data source that has no, or only occasional, connectivity to the
+	tracked database.  Current row data are obtained by joining ChangeTracking 
+	tables to thier source tables. 
+
+	Let's see how it works...	
+*/
+
+/******************************************************************************/	
+-- Setup...
+SET NOCOUNT ON;
+USE master; 
+
+DROP DATABASE IF EXISTS ChangeTracking;
+GO
+
+CREATE DATABASE ChangeTracking;
+GO
+
+-- Create and populate a test table
+-- Tracked tables *must* have a primary key
+USE ChangeTracking;
+GO
+
+CREATE TABLE dbo.Inventory (
+	InventoryId INT IDENTITY,
+	ItemName VARCHAR(20),
+	ItemCount INT,
+	ReorderPoint INT,
+	DateModified DATETIME2(0) DEFAULT GETDATE(),
+	CONSTRAINT PK_Inventory PRIMARY KEY CLUSTERED (InventoryId)
+);
+GO
+
+INSERT  INTO dbo.Inventory ( ItemName, ItemCount, ReorderPoint )
+VALUES  ( 'villouslou', 211, 3 ), ( 'scharri', 275, 89 ), ( 'mateboar', 209, 141 ),
+        ( 'burlemso', 955, 35 ), ( 'chinctin', 354, 48 ), ( 'ationse', 983, 9 ),
+        ( 'digrate', 360, 72 ), ( 'swammatin', 165, 59 ), ( 'waitaxon', 856, 48 ),
+        ( 'heringrame', 736, 5 ), ( 'joictivel', 899, 118 ), ( 'rotank', 299, 33 ),
+        ( 'gative', 782, 50 ), ( 'tervivel', 86, 89 ), ( 'notena', 412, 41 ),
+        ( 'haulincla', 228, 127 ), ( 'trand', 546, 172 ), ( 'hizantur', 65, 109 ),
+        ( 'schwes', 111, 55 ), ( 'piridgern', 528, 171 );
+GO
+
+/******************************************************************************/	
+-- Enable on Change Tracking...
+
+-- First for the database
+ALTER DATABASE ChangeTracking
+SET CHANGE_TRACKING = ON 
+(CHANGE_RETENTION = 3 DAYS, AUTO_CLEANUP = ON);
+GO
+/*
+	Retention time can be set in minutes, hours or days.  
+	Auto Cleanup will delete tracking data older than Change Retention.  It can
+	be temporarily disabled if, for example, you're having difficulties sync'ing 
+	with a remote server and don't want to lose needed data.
+*/
+
+-- Then for each table we want to track
+ALTER TABLE dbo.Inventory 
+ENABLE CHANGE_TRACKING 
+WITH (TRACK_COLUMNS_UPDATED = ON);
+GO
+/* 
+	Column tracking is off by default.  Enabling it adds to the cost of tracking.
+
+	To disable Change Tracking first disable it for the table(s) then for the
+	database:
+	
+	ALTER TABLE dbo.Inventory DISABLE CHANGE_TRACKING;
+	ALTER DATABASE Alterations SET CHANGE_TRACKING = OFF;
+*/
+/******************************************************************************/
+-- Verifying that tracking is enabled...
+SELECT DB_NAME(database_id) AS database_name, 
+       is_auto_cleanup_on,
+       retention_period, 
+	   retention_period_units_desc,
+	   max_cleanup_version
+FROM sys.change_tracking_databases;
+/*
+	max_cleanup_version	= version associated with last round of data cleanup
+*/
+
+SELECT OBJECT_NAME(object_id) AS table_name, 
+       is_track_columns_updated_on,
+       min_valid_version, 
+	   begin_version, 
+	   cleanup_version
+FROM sys.change_tracking_tables;
+/*
+	min_valid_version	earliest version of change available for the table
+	begin_version		when did change tracking begin (reset on truncate)
+	cleanup_version		version up to which clean up has removed data
+*/
+/******************************************************************************/
+-- make some changes dbo.Inventory
+UPDATE dbo.Inventory SET ItemCount = 86, 
+       DateModified = SYSDATETIME() WHERE InventoryId = 15;
+
+DELETE FROM dbo.Inventory WHERE ItemName = 'joictivel';
+
+INSERT INTO dbo.Inventory ( ItemName, ItemCount, ReorderPoint )
+	VALUES ('blaineurs', CEILING(RAND() * 1000), CEILING((RAND() * 1000) * 0.2));
+
+UPDATE dbo.Inventory SET ReorderPoint = 10, DateModified = SYSDATETIME() WHERE ReorderPoint < 20;
+
+-- And see how the changes are tracked using the CHANGETABLE table-valued function
+SELECT CT.* FROM CHANGETABLE(CHANGES dbo.Inventory, NULL) CT;
+GO
+
+/*
+	SYS_CHANGE_VERSION contains the version number associated with the last change
+	to each row.  Our 4 statements (transactions) were assigned versions 1-4.  The 
+	second UPDATE statement affected 3 rows, so version 4 is associated with 3 rows.
+	
+	SYS_CHANGE_CREATION_VERSION shows the version assocated with insertion of a new row.
+
+	SYS_CHANGE_OPERATION is the operation that changed row data (U=Update, D=Delete, I=Insert)
+
+	SYS_CHANGE_COLUMNS it a bit mask that tracks which columns were updated (if
+	this option is turned on).  There's a function to help us decipher this information.
+	This value will be NULL for Inserts and Deletes which affect all columns.
+	 
+	SYS_CHANGE_CONTEXT is optional, contextual information (stored as VARBINARY) that 
+	can be included when changing data.  We'll see an example later.
+
+	Lastly, we've got the Primary Key values for the modified rows.  There will never be more
+	than one row of change data for one row of table data.  
+*/
+
+-- If we modify a tracked row a second time... 
+UPDATE dbo.Inventory 
+SET ItemName = REVERSE(ItemName) 
+WHERE InventoryId = 10;
+
+SELECT CT.* FROM CHANGETABLE(CHANGES dbo.Inventory, NULL) CT;
+GO
+/*
+	It's version is updated (from 4 to 5 in this case), but we still only see one
+	row in the CHANGETABLE output.  There will never be more than one tracked row
+	per source table row.
+
+	Change Tracking is about net change, not about monitoring specific changes to 
+	data values.  That would be accomplished using Change Data Capture.
+*/
+
+/******************************************************************************/
+-- Using Change Tracking data - working with version numbers
+/*
+	To use the change data in a meaningful way you'll periodically query for 
+	changes made since the last data sync using the version numbers.  On each 
+	sync operation you'll need to...
+
+		1) know the max version number available at the prior data sync (you'll 
+		   only want changes made after this point for the current sync)
+	
+		2) verify that all the data you need is still available in the tracking 
+		   table and hasn't been automatically cleaned up.
+
+		3) note the current max version number and store it for the next sync		   
+*/
+
+-- You'll query for this version information using these two functions...
+SELECT CHANGE_TRACKING_CURRENT_VERSION() AS current_tracked_version_for_database;
+GO
+/*
+	Returns the last version number used across all tracked tables
+	This will be your new "sync'd up through" value you'll store for next time
+*/
+SELECT CHANGE_TRACKING_MIN_VALID_VERSION(OBJECT_ID('dbo.Inventory')) AS min_tracked_version_for_table;
+GO
+/*
+	Returns the smallest version number still available for a specific table
+	(0 indicates all changes since tracking began)
+
+	If the prior sync value is no longer available there's a risk of data loss
+	and the table should be re-initialized in the remote store.
+*/
+
+/******************************************************************************/
+-- Using Change Tracking data - gathering changed data
+/*
+	To gather data on changed rows to update your remote/offline data stores you
+	simply join the tracking table to the corresponding source table.  Use an
+	OUTER JOIN to include information on deleted rows
+
+	Passing a NULL to the function gets us all available data.
+	Passing an integer gets us all changes having a version greater than that value.
+*/
+SELECT  CT.InventoryId, 
+        I.ItemName, 
+		I.ItemCount, 
+		I.ReorderPoint, 
+		I.DateModified,
+        CT.SYS_CHANGE_VERSION, 
+		CT.SYS_CHANGE_OPERATION
+FROM    dbo.Inventory I
+RIGHT OUTER JOIN CHANGETABLE(CHANGES dbo.Inventory, NULL) CT 
+	ON CT.InventoryId = I.InventoryId
+WHERE   CT.InventoryId IS NOT NULL;
+
+SELECT  CT.InventoryId, I.ItemName, 
+        I.ItemCount, 
+		I.ReorderPoint, 
+		I.DateModified,
+        CT.SYS_CHANGE_VERSION, 
+		CT.SYS_CHANGE_OPERATION
+FROM    dbo.Inventory I
+RIGHT OUTER JOIN CHANGETABLE(CHANGES dbo.Inventory, 4) CT 
+	ON CT.InventoryId = I.InventoryId
+WHERE   CT.InventoryId IS NOT NULL;
+GO
+
+/* 
+	Since the version number is constantly being updated as data is modified it's 
+	strongly recommended that you use Snaphot Isolate when performing data syncs.  
+	This ensures you get a consistent data set across all queried tables.
+
+	Here's a simple example of what a sync operation might look like using Snapshot 
+	Isolation and version validation...
+*/
+
+-- Allow Snapshot Isolation for the database (this can be left ON)
+ALTER DATABASE ChangeTracking SET ALLOW_SNAPSHOT_ISOLATION ON;
+GO
+
+-- Let's update a few more rows to make the data a bit more interesting
+UPDATE dbo.Inventory SET ItemCount -= 5 WHERE InventoryId % 4 = 0;
+UPDATE dbo.Inventory SET ReorderPoint *= 1.03 WHERE InventoryId % 5 = 0;
+DELETE FROM dbo.Inventory WHERE ReorderPoint > 150;
+GO
+
+-- Then you enable Snapshot Isolation on a per-session level
+SET TRAN ISOLATION LEVEL SNAPSHOT;
+
+-- You'll need to know the max version number saved from the last data sync and 
+-- you'll need to retrieve and store the new max version one from this operation
+DECLARE @last_sync_version BIGINT = 4,
+		@new_sync_version BIGINT;
+
+BEGIN TRAN
+	-- Validate that your last_sync_version value still exists in the change table
+	IF @last_sync_version < CHANGE_TRACKING_MIN_VALID_VERSION(OBJECT_ID('dbo.Inventory'))
+		BEGIN
+			RAISERROR (N'Last_sync_version too old', 16, -1);
+		END
+
+	ELSE  -- Retrieve data changes to update your remote data store 
+	BEGIN
+		-- Grab (and store) the current sync version to use for your next data sync
+		SET @new_sync_version = CHANGE_TRACKING_CURRENT_VERSION();
+
+		-- Get the current values of all rows that have changed since the last sync
+		-- Use an Outer Join to include information for any deleted rows
+		SELECT  CT.InventoryId, I.ItemName, I.ItemCount, I.ReorderPoint, I.DateModified,
+				CT.SYS_CHANGE_VERSION, CT.SYS_CHANGE_OPERATION
+		FROM    dbo.Inventory I
+				RIGHT OUTER JOIN CHANGETABLE(CHANGES dbo.Inventory, @last_sync_version) CT ON CT.InventoryId = I.InventoryId
+		WHERE   CT.InventoryId IS NOT NULL;
+	END	
+COMMIT
+SELECT @new_sync_version AS new_sync_version;
+GO
+
+-- Revert to the default isolation level
+SET TRAN ISOLATION LEVEL READ COMMITTED;
+GO
+
+/******************************************************************************/
+-- Using Column tracking
+
+/*
+	There may be situations where it's desireable or more efficient to update 
+	selected columns instead of an entire row.  
+
+	We can use a system function to ask whether a particular column is among those
+	included in the SYS_CHANGE_COLUMNS bitmap mask value.  The function takes two
+	parameters - the bitmask and a column id.
+*/
+
+-- For which rows did we update the ReorderPoint?  (1 = changed)
+DECLARE @column_id INT = COLUMNPROPERTY(OBJECT_ID('dbo.Inventory'), 'ReorderPoint', 'ColumnId');
+SELECT  CT.*,
+        CHANGE_TRACKING_IS_COLUMN_IN_MASK(@column_id, CT.SYS_CHANGE_COLUMNS)
+        AS ReorderPoint_changed		
+FROM    CHANGETABLE(CHANGES dbo.Inventory, NULL) CT;
+GO	
+
+-- For which rows did we update the ItemName?  (1 = changed)
+DECLARE @column_id INT = COLUMNPROPERTY(OBJECT_ID('dbo.Inventory'), 'ItemName', 'ColumnId');
+SELECT  CT.*,
+        CHANGE_TRACKING_IS_COLUMN_IN_MASK(@column_id, CT.SYS_CHANGE_COLUMNS)
+        AS ItemName_changed		
+FROM    CHANGETABLE(CHANGES dbo.Inventory, NULL) CT;
+GO
+
+/******************************************************************************/
+-- Using Change Context...
+
+/*
+	This option gives you a means to record useful information about the context
+	in which a change was made
+*/
+
+-- Cast some helpful, contextual information at varbinary 
+DECLARE @useful_information varbinary(128) = CAST('Bob''s updating inventory' AS varbinary(128));
+
+-- Then update the table change using the WITH CHANGE_TRACKING_CONTEXT clause
+WITH CHANGE_TRACKING_CONTEXT (@useful_information)
+	UPDATE dbo.Inventory 
+	SET ItemCount = 500, DateModified = SYSDATETIME() 
+	WHERE InventoryId = 2;
+
+-- Then you can view the information by casting it back to a string datatype
+SELECT CT.*, CAST(CT.SYS_CHANGE_CONTEXT AS VARCHAR(100)) AS change_context
+FROM CHANGETABLE(CHANGES dbo.Inventory, 0) CT;
+GO
+
+/******************************************************************************/
+-- Clean up
+USE master;
+ALTER DATABASE ChangeTracking SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+DROP DATABASE ChangeTracking;
+GO
