@@ -160,8 +160,8 @@ CREATE TABLE [Data].Membership (
     Phone VARCHAR(12) MASKED WITH (FUNCTION = 'default()') NULL,
     Email VARCHAR(100) MASKED WITH (FUNCTION = 'email()') NOT NULL,
     DiscountCode SMALLINT MASKED WITH (FUNCTION = 'random(1, 100)') NULL,
-    BirthDay DATETIME MASKED WITH (FUNCTION = 'default()') NULL
-);
+    BirthDay DATETIME MASKED WITH (FUNCTION = 'datetime("YMDhms")') NULL
+	);
 GO
 
 --insert sample data
@@ -173,6 +173,13 @@ VALUES
 ('Zheng', 'Mu', '555.123.4569', 'ZMu@contoso.net', 40, '1990-03-01 06:00:00');
 GO
 
+--query for masked columns
+SELECT c.name, tbl.name as table_name, c.is_masked, c.masking_function
+FROM sys.masked_columns AS c
+JOIN sys.tables AS tbl
+    ON c.[object_id] = tbl.[object_id]
+WHERE is_masked = 1;
+
 --create schema to contain service tables
 CREATE SCHEMA [Service];
 GO
@@ -182,7 +189,8 @@ CREATE TABLE [Service].Feedback (
     MemberID INT IDENTITY(1, 1) NOT NULL PRIMARY KEY CLUSTERED,
     Feedback VARCHAR(100) MASKED WITH (FUNCTION = 'default()') NULL,
     Rating INT MASKED WITH (FUNCTION = 'default()'),
-    Received_On DATETIME);
+    Received_On DATETIME MASKED WITH (FUNCTION = 'datetime("YMDhms")')
+);
 GO
 
 --insert sample data
@@ -212,11 +220,14 @@ grant different UNMASK permissions to users
 */
 --Grant column level UNMASK permission to ServiceAttendant
 GRANT UNMASK ON [Data].Membership(FirstName) TO ServiceAttendant;
+
 -- Grant table level UNMASK permission to ServiceLead
 GRANT UNMASK ON [Data].Membership TO ServiceLead;
+
 -- Grant schema level UNMASK permission to ServiceManager
 GRANT UNMASK ON SCHEMA::Data TO ServiceManager;
 GRANT UNMASK ON SCHEMA::Service TO ServiceManager;
+
 --Grant database level UNMASK permission to ServiceHead;
 GRANT UNMASK TO ServiceHead;
 GO
