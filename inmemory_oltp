@@ -1,0 +1,285 @@
+/*
+THIS SAMPLE CODE AND ANY RELATED INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, 
+EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY AND/OR FITNESS 
+FOR A PARTICULAR PURPOSE. 
+
+We grant You a nonexclusive, royalty-free right to use and modify the Sample Code and to reproduce and distribute 
+the object code form of the Sample Code, provided that You agree: ?
+(i) to not use Our name, logo, or trademarks to market Your software product in which the Sample Code is embedded; ?
+(ii) to include a valid copyright notice on Your software product in which the Sample Code is embedded; and ?
+(iii) to indemnify, hold harmless, and defend Us and Our suppliers from and against any claims or lawsuits, including attorneys’ fees, 
+that arise or result from the use or distribution of the Sample Code. ?
+Please note: None of the conditions outlined in the disclaimer above will supersede the terms and conditions 
+contained within the Premier Customer Services Description. ?
+*/
+SET NOCOUNT ON;
+
+USE master;
+GO
+
+DROP DATABASE IF EXISTS InMemTest0329;
+GO
+
+CREATE DATABASE InMemTest0329;
+GO
+
+ALTER DATABASE InMemTest0329 SET RECOVERY SIMPLE;
+GO
+
+USE InMemTest0329;
+GO
+
+-- First we have to add a special filegroup for our in-memory data files
+ALTER DATABASE InMemTest0329 ADD FILEGROUP InMemory CONTAINS MEMORY_OPTIMIZED_DATA;
+GO	
+
+DECLARE @DefaultDataPath NVARCHAR(1000);
+SET @DefaultDataPath = CONVERT(NVARCHAR(1000), SERVERPROPERTY('InstanceDefaultDataPath'));
+
+EXEC('ALTER DATABASE InMemTest0329
+      ADD FILE (
+          NAME = N''InMemTest0329_Data'',
+          FILENAME = N''' + @DefaultDataPath + '\InMemTest0329_Data''
+      )
+	  TO FILEGROUP InMemory');
+GO
+/*
+	The "file" here is actually a path to a folder which will contain, among
+	other things, paired Data and Delta files (once you create an in-memory 
+	table).
+
+	These files will contain the table data.  They aren't used for transaction
+	processing - all that happens in memory - but rather to persist the data on
+	disk for recoveries/restarts.  
+	
+	Table inserts are written to the Data file, deletes are written to the Delta 
+	file, and updates are handled as a delete+insert and written to both files.
+
+	All writes are sequential and batched to optimize performance.
+*/
+
+/*****************************************************************************/
+
+-- Create an on-disk table with a clustered index and one nonclustered index
+DROP TABLE IF EXISTS dbo.ProdOnDisk
+GO
+
+CREATE TABLE dbo.ProdOnDisk (
+    ProdOnDiskId BIGINT IDENTITY,
+	ProductId VARCHAR(20) NOT NULL,
+    StockOnHand INT NOT NULL,
+    ReorderPoint INT NOT NULL,
+    CreateDate DATETIME2 DEFAULT SYSDATETIME(),
+	CONSTRAINT PK_ProdOnDisk PRIMARY KEY CLUSTERED (ProdOnDiskId)
+) ON [PRIMARY];
+GO
+
+CREATE NONCLUSTERED INDEX ix_StockOnHand_ReorderPoint ON dbo.ProdOnDisk (StockOnHand, ReorderPoint);
+GO
+
+-- Create an equivalent in-memory table
+DROP TABLE IF EXISTS dbo.ProdInMem
+GO
+
+CREATE TABLE dbo.ProdInMem (
+    ProdInMemId BIGINT IDENTITY PRIMARY KEY NONCLUSTERED HASH WITH (BUCKET_COUNT = 100000),
+	ProductId VARCHAR(20) NOT NULL,
+    StockOnHand INT NOT NULL,
+    ReorderPoint INT NOT NULL,
+    CreateDate DATETIME2 DEFAULT SYSDATETIME(),
+	INDEX ix_StockOnHand_ReorderPoint (StockOnHand, ReorderPoint)
+) WITH (MEMORY_OPTIMIZED=ON, DURABILITY = SCHEMA_AND_DATA);
+GO
+/*
+	Notes on the in-memory table...
+	
+	The Primary Key is a Hash Index.  Hash indexes contain hashed values of the
+	indexes key values, and as such can only be used for searches using all the
+	index columns (so you couldn't use a hash index on (LastName, FirstName) to
+	search for just LastName = 'Jones').
+
+	We've also created a nonclustered index on (StockOnHand, ReorderPoint).  This
+	one will work like a traditional nonclustered index - except that the scan 
+	order is fixed.  SQL Server can't do a backward scan to presort the data if
+	you want to ORDER BY StockOnHand DESC;
+	
+	All indexes on in-memory tables are essentially covering.  The index just 
+	consists of the keys (or hashes of the keys) and pointers back to the parent 
+	rows.
+		
+	The hash index bucket count determines how many hash buckets will be created
+	to hold the hashes of the key column(s) values.  The number of buckets should
+	be about the same as the number of unique key column values there are in the 
+	table.  
+	
+	Each bucket takes up 8 bytes of memory.  It's better to overestimate your bucket 
+	count and waste a little memory than to end up stuffing multiple has values into
+	single buckets.
+	
+	Whatever bucket count you specify it will be rounded up to the next power of
+	2. You can alter the bucket count if desired.
+
+	Lastly, we tell SQL Server that this is a Memory Optimized table, and that
+	we want to persist both the schema and data to disk.  
+*/
+
+/*****************************************************************************/
+
+-- Let's create a couple of stored procs to insert data into the tables 
+CREATE PROC dbo.insertProdOnDisk @rowcount INT
+AS 
+BEGIN TRAN
+	DECLARE @counter INT = 1, @number INT;
+	WHILE (@counter <= @rowcount)
+	BEGIN
+		SET @number = ABS(CAST(CAST(NEWID()AS VARBINARY) AS INT));
+		INSERT INTO dbo.ProdOnDisk ( ProductId, StockOnHand, ReorderPoint, CreateDate )
+		VALUES (CAST(@number AS VARCHAR(20)), (@number % 1234), (@number % 123), DATEADD(SECOND, (-1 * @number/100), SYSDATETIME()));
+		SET @counter += 1;
+	END
+COMMIT
+GO
+
+CREATE PROC dbo.insertProdInMem @rowcount INT
+AS 
+BEGIN TRAN
+	DECLARE @counter INT = 1, @number INT;
+	WHILE (@counter <= @rowcount)
+	BEGIN
+		SET @number = ABS(CAST(CAST(NEWID()AS VARBINARY) AS INT));
+		INSERT INTO dbo.ProdInMem ( ProductId, StockOnHand, ReorderPoint, CreateDate )
+		VALUES (CAST(@number AS VARCHAR(20)), (@number % 1234), (@number % 123), DATEADD(SECOND, (-1 * @number/100), SYSDATETIME()));
+		SET @counter += 1;
+	END	
+COMMIT
+GO
+/*
+	stored procs are used here instead a batch of sql statements for a couple of
+	reasons...
+	
+	1) For comparable insert methods for a step that's coming later when
+	   in the natively compiled stored procedure (ie, an in-memory stored
+	   proc)
+
+	2) Sending 100K individual inserts across the network is a bad idea
+*/
+
+/*****************************************************************************/
+
+-- compare the time it takes to insert data into the two tables
+DECLARE @now DATETIME2 = SYSDATETIME();
+EXEC dbo.insertProdOnDisk @rowcount = 100000;
+SELECT 'inserts to ProdOnDisk', DATEDIFF(ms, @now, SYSDATETIME()) AS insert_time_ms;
+GO
+
+DECLARE @now DATETIME2 = SYSDATETIME();
+EXEC dbo.insertProdInMem @rowcount = 100000;
+SELECT 'inserts to ProdInMem', DATEDIFF(ms, @now, SYSDATETIME()) AS insert_time_ms;
+GO
+/*
+	My actual run times vary a bit, but in general I'm seeing at 2-3X better 
+	performance inserting data into the memory-optimized table...
+
+							insert_time_ms
+		inserts to ProdOnDisk		1466
+		inserts to ProdInMem		870
+
+	create the natively compiled stored procedure
+*/
+
+CREATE PROCEDURE insertProdInMem_native @rowcount INT
+WITH NATIVE_COMPILATION, SCHEMABINDING
+AS
+BEGIN ATOMIC WITH ( TRANSACTION ISOLATION LEVEL = SNAPSHOT, LANGUAGE = N'us_english' )
+	DECLARE @counter INT = 1, @number INT;
+	WHILE (@counter <= @rowcount)
+	BEGIN
+		SET @number = ABS(CAST(CAST(NEWID()AS VARBINARY) AS INT));
+		INSERT INTO dbo.ProdInMem ( ProductId, StockOnHand, ReorderPoint, CreateDate )
+		VALUES (CAST(@number AS VARCHAR(20)), (@number % 1234), (@number % 123), DATEADD(SECOND, (-1 * @number/100), SYSDATETIME()));
+		SET @counter += 1;
+	END
+END
+GO
+/*
+	Explaining the extra options...
+
+	NATIVE_COMPILATION - Tells SQL Server to compile the proc to C code.  This
+		makes it much more efficient to run.
+	SCHEMABINDING - prevents changes to the underlying table (required)
+	BEGIN ATOMIC -  guarantees atomic execution of the stored procedure (all or
+		none) and is required.  Its two parameters are also required.  
+
+	Now, let's see how long 100K inserts into the in-memory table take using
+	the natively compiled proc...
+*/
+
+DECLARE @now DATETIME2 = SYSDATETIME();
+EXEC dbo.insertProdInMem_native @rowcount = 100000;
+SELECT 'inserts to ProdInMem (compiled proc)', DATEDIFF(ms, @now, SYSDATETIME()) AS insert_time_ms;
+GO
+
+/*
+										insert_time_ms
+	inserts to ProdInMem (compiled proc)		217
+
+	inserts to ProdOnDisk (on-disk table)		870
+	inserts to ProdInMem  (traditiona proc)		1466
+*/
+
+/*****************************************************************************/
+
+/*
+	Explore what help the indexes offer on a series of SELECTs,
+	the try out a some updates and deletes.
+
+	Start with a delete to level the playing field since our
+	in-memory table now contains 200K rows...
+*/
+
+-- Delete "surplus" rows from the in-memory table
+DELETE FROM dbo.ProdInMem WHERE ProdInMemId > 100000;
+GO
+-- Monitor query run-times (monitoring IO isn't helpful here since there
+-- isn't any for comparision for the in-memory tables).
+
+SET STATISTICS TIME ON;
+/* 
+	Turn on the option to Include Actual Execution Plan (Ctrl+M) 
+
+	Make sure to turn it off if you rerun the demo script
+*/
+
+-- Both use indexes and run quickly (point lookups)
+SELECT * FROM dbo.ProdOnDisk WHERE ProdOnDiskId = 15935;
+SELECT * FROM dbo.ProdInMem WHERE ProdInMemId = 15935;
+
+-- The hash index can't be used for range scans
+SELECT COUNT(*) FROM dbo.ProdOnDisk WHERE ProdOnDiskId BETWEEN 50000 AND 60000;
+SELECT COUNT(*) FROM dbo.ProdInMem WHERE ProdInMemId BETWEEN 50000 AND 60000;
+
+-- All in-memory indexes are covering, so you won't see Lookups
+SELECT ProductId FROM dbo.ProdOnDisk WHERE StockOnHand = 1200;
+SELECT ProductId FROM dbo.ProdInMem WHERE StockOnHand = 1200;
+
+-- Can't leverage the in-memory nonclustered index when querying for a value
+-- other than the index's leading key
+SELECT * FROM dbo.ProdOnDisk WHERE ReorderPoint = 200;
+SELECT * FROM dbo.ProdInMem WHERE ReorderPoint = 200;
+
+-- Update lots of rows - the in-memory table is faster
+UPDATE dbo.ProdOnDisk SET CreateDate = SYSDATETIME() WHERE ProductId LIKE '[1-5]%';
+UPDATE dbo.ProdInMem SET CreateDate = SYSDATETIME() WHERE ProductId LIKE '[1-5]%';
+
+-- Delete lots of rows
+DELETE FROM dbo.ProdOnDisk WHERE StockOnHand = 0;
+DELETE FROM dbo.ProdInMem WHERE StockOnHand = 0;
+
+/*****************************************************************************/
+
+-- Clean up
+USE master;
+GO
+
+DROP DATABASE InMemTest0329;
+GO
