@@ -24,6 +24,10 @@ GO
 CREATE DATABASE AccountingLedger
 GO
 
+ALTER DATABASE AccountingLedger
+SET ALLOW_SNAPSHOT_ISOLATION ON;
+GO
+
 USE AccountingLedger
 GO
 
@@ -36,7 +40,7 @@ CREATE TABLE [Account].[Balance]
     [FirstName] VARCHAR (50) NOT NULL,
     [Balance] DECIMAL (10,2) NOT NULL)
 WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = [Account].[BalanceHistory]),
- LEDGER = ON);
+      LEDGER = ON);
 
 --When your updatable ledger table is created, 
 -- the corresponding history table and ledger view are also created. 
@@ -64,7 +68,6 @@ VALUES	(2, 'Smith', 'John', 500),
 		(4, 'Michaels', 'Mary', 200);
 
 --View the [Account].[Balance] updatable ledger table, and specify the GENERATED ALWAY columns added to the table.
-
 SELECT [CustomerID]
    ,[LastName]
    ,[FirstName]
@@ -85,7 +88,6 @@ The ledger_start_sequence_number column notes the order by which values were ins
 */
 
 -- Update Nick's balance from 50 to 100.
-
 UPDATE [Account].[Balance] 
 SET [Balance] = 100
 WHERE [CustomerID] = 1;
@@ -107,4 +109,29 @@ ORDER BY t.commit_time DESC;
  /* Nick's account balance was successfully updated in the updatable ledger table to 100. 
    The ledger view shows that updating the ledger table is a DELETE of the original row with 50. 
    The balance with a corresponding INSERT of a new row with 100 shows the new balance for Nick. */
-  SELECT * FROM Account.BalanceHistory
+SELECT * FROM Account.BalanceHistory
+
+/*Records the table hashes for each transaction in the database as well as the user who issued the transaction */
+SELECT * 
+FROM sys.database_ledger_transactions 
+
+/* Records the hash of each block created in the database, along with the # of transactions in the block */
+SELECT * 
+FROM sys.database_ledger_blocks
+
+-- Step 1: Generate the current database digest
+EXEC sp_generate_database_ledger_digest;
+
+-- Step 2: Copy the JSON output from the results and paste it into the variable below
+DECLARE @digest NVARCHAR(MAX);
+SET @digest = N'{
+  "database_name": "AccountingLedger",
+  "block_id": 0,
+  "hash": "0xA7385205535F1A0866269F5C1BDB155BBDC314CDBF2FA194E51556BC34490E7C",
+  "last_transaction_commit_time": "2026-01-23T21:40:16.8533333",
+  "digest_time": "2026-01-24T02:41:36.0603263"}';
+-- Step 3: Verify the ledger using the digest
+EXEC sp_verify_database_ledger @digest;
+
+-- If successful, no tampering has occurred
+-- If it fails with an error, tampering has been detected
