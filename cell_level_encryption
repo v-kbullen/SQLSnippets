@@ -1,0 +1,416 @@
+/*
+================================================================================
+SQL Server Cell-Level Encryption Demo
+================================================================================
+This script demonstrates cell-level encryption using EncryptByKey/DecryptByKey
+Author: Kevin
+Date: February 2026
+================================================================================
+*/
+
+-- Clean up from any previous runs
+USE master;
+GO
+
+IF DB_ID('EncryptionDemo') IS NOT NULL
+BEGIN
+    ALTER DATABASE EncryptionDemo SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE EncryptionDemo;
+END
+GO
+
+-- Create demo database
+CREATE DATABASE EncryptionDemo;
+GO
+
+USE EncryptionDemo;
+GO
+
+PRINT '================================================================================';
+PRINT 'Step 1: Create Database Master Key';
+PRINT '================================================================================';
+PRINT '';
+
+-- The Database Master Key (DMK) is the root of the encryption hierarchy
+-- It encrypts certificates and symmetric keys in the database
+CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'StrongP@ssw0rd123!';
+GO
+
+-- Verify the master key was created
+SELECT name, 
+       principal_id, 
+       create_date, 
+       modify_date
+FROM sys.symmetric_keys
+WHERE name = '##MS_DatabaseMasterKey##';
+GO
+
+PRINT '';
+PRINT '================================================================================';
+PRINT 'Step 2: Create Certificate';
+PRINT '================================================================================';
+PRINT '';
+
+-- Create a certificate to protect the symmetric key
+-- In production, you should backup this certificate!
+CREATE CERTIFICATE EmployeeCert
+    WITH SUBJECT = 'Certificate for Employee Data Encryption',
+         EXPIRY_DATE = '2027-12-31';
+GO
+
+-- Verify certificate creation
+SELECT name, 
+       certificate_id, 
+       pvt_key_encryption_type_desc,
+       start_date, 
+       expiry_date,
+       subject
+FROM sys.certificates
+WHERE name = 'EmployeeCert';
+GO
+
+PRINT '';
+PRINT '================================================================================';
+PRINT 'Step 3: Create Symmetric Key';
+PRINT '================================================================================';
+PRINT '';
+
+-- Create a symmetric key protected by the certificate
+-- AES_256 is recommended for strong encryption
+CREATE SYMMETRIC KEY EmployeeKey
+    WITH ALGORITHM = AES_256
+    ENCRYPTION BY CERTIFICATE EmployeeCert;
+GO
+
+-- Verify symmetric key creation
+SELECT name, 
+       symmetric_key_id, 
+       key_length, 
+       algorithm_desc,
+       create_date
+FROM sys.symmetric_keys
+WHERE name = 'EmployeeKey';
+GO
+
+PRINT '';
+PRINT '================================================================================';
+PRINT 'Step 4: Create Table with Encrypted Columns';
+PRINT '================================================================================';
+PRINT '';
+
+-- Create a table to store employee data
+-- Note: Encrypted columns must be VARBINARY
+CREATE TABLE dbo.Employees
+(
+    EmployeeID INT IDENTITY(1,1) PRIMARY KEY,
+    FirstName NVARCHAR(50) NOT NULL,
+    LastName NVARCHAR(50) NOT NULL,
+    -- Store encrypted data as VARBINARY
+    SSN_Encrypted VARBINARY(256) NULL,
+    Salary_Encrypted VARBINARY(256) NULL,
+    Email_Encrypted VARBINARY(256) NULL,
+    -- Store the date when the record was created
+    CreatedDate DATETIME2 DEFAULT SYSDATETIME()
+);
+GO
+
+PRINT 'Table created successfully.';
+PRINT '';
+
+PRINT '================================================================================';
+PRINT 'Step 5: Insert Data with Encryption';
+PRINT '================================================================================';
+PRINT '';
+
+-- Open the symmetric key for use
+-- You must open the key before encrypting/decrypting
+OPEN SYMMETRIC KEY EmployeeKey
+    DECRYPTION BY CERTIFICATE EmployeeCert;
+GO
+
+-- Insert sample data with encryption
+INSERT INTO dbo.Employees (FirstName, LastName, SSN_Encrypted, Salary_Encrypted, Email_Encrypted)
+VALUES 
+    ('John', 'Doe', 
+     EncryptByKey(Key_GUID('EmployeeKey'), '123-45-6789'),
+     EncryptByKey(Key_GUID('EmployeeKey'), '85000'),
+     EncryptByKey(Key_GUID('EmployeeKey'), 'john.doe@company.com')),
+    
+    ('Jane', 'Smith',
+     EncryptByKey(Key_GUID('EmployeeKey'), '987-65-4321'),
+     EncryptByKey(Key_GUID('EmployeeKey'), '92000'),
+     EncryptByKey(Key_GUID('EmployeeKey'), 'jane.smith@company.com')),
+    
+    ('Bob', 'Johnson',
+     EncryptByKey(Key_GUID('EmployeeKey'), '456-78-9012'),
+     EncryptByKey(Key_GUID('EmployeeKey'), '78000'),
+     EncryptByKey(Key_GUID('EmployeeKey'), 'bob.johnson@company.com')),
+    
+    ('Alice', 'Williams',
+     EncryptByKey(Key_GUID('EmployeeKey'), '234-56-7890'),
+     EncryptByKey(Key_GUID('EmployeeKey'), '95000'),
+     EncryptByKey(Key_GUID('EmployeeKey'), 'alice.williams@company.com'));
+
+-- Close the symmetric key when done
+CLOSE SYMMETRIC KEY EmployeeKey;
+GO
+
+PRINT 'Data inserted successfully with encryption.';
+PRINT '';
+
+PRINT '================================================================================';
+PRINT 'Step 6: View Encrypted Data (Raw)';
+PRINT '================================================================================';
+PRINT '';
+
+-- View the encrypted data as stored
+-- This shows what an attacker would see without the decryption key
+SELECT EmployeeID,
+       FirstName,
+       LastName,
+       SSN_Encrypted,
+       Salary_Encrypted,
+       Email_Encrypted,
+       CreatedDate
+FROM dbo.Employees;
+GO
+
+PRINT '';
+PRINT '================================================================================';
+PRINT 'Step 7: Decrypt and View Data';
+PRINT '================================================================================';
+PRINT '';
+
+-- Open the symmetric key for decryption
+OPEN SYMMETRIC KEY EmployeeKey
+    DECRYPTION BY CERTIFICATE EmployeeCert;
+GO
+
+-- Decrypt the data for viewing
+-- Convert the decrypted VARBINARY back to the original data type
+SELECT EmployeeID,
+       FirstName,
+       LastName,
+       CONVERT(VARCHAR(11), DecryptByKey(SSN_Encrypted)) AS SSN,
+       CONVERT(VARCHAR(20), DecryptByKey(Salary_Encrypted)) AS Salary,
+       CONVERT(VARCHAR(100), DecryptByKey(Email_Encrypted)) AS Email,
+       CreatedDate
+FROM dbo.Employees
+ORDER BY EmployeeID;
+GO
+
+-- Close the symmetric key
+CLOSE SYMMETRIC KEY EmployeeKey;
+GO
+
+PRINT '';
+PRINT '================================================================================';
+PRINT 'Step 8: Create View for Easy Access to Decrypted Data';
+PRINT '================================================================================';
+PRINT '';
+GO
+
+-- Create a view that automatically handles decryption
+-- Users with SELECT permission on the view can see decrypted data
+-- They also need VIEW DEFINITION on the certificate
+CREATE VIEW dbo.vw_Employees_Decrypted
+WITH ENCRYPTION
+AS
+SELECT EmployeeID,
+       FirstName,
+       LastName,
+       CONVERT(VARCHAR(11), DecryptByKey(SSN_Encrypted)) AS SSN,
+       CONVERT(DECIMAL(18,2), CONVERT(VARCHAR(20), DecryptByKey(Salary_Encrypted))) AS Salary,
+       CONVERT(VARCHAR(100), DecryptByKey(Email_Encrypted)) AS Email,
+       CreatedDate
+FROM dbo.Employees;
+GO
+
+PRINT 'View created successfully.';
+PRINT '';
+
+-- To query the view, you must first open the symmetric key
+OPEN SYMMETRIC KEY EmployeeKey
+    DECRYPTION BY CERTIFICATE EmployeeCert;
+GO
+
+SELECT * FROM dbo.vw_Employees_Decrypted ORDER BY EmployeeID;
+GO
+
+CLOSE SYMMETRIC KEY EmployeeKey;
+GO
+
+PRINT '';
+PRINT '================================================================================';
+PRINT 'Step 9: Update Encrypted Data';
+PRINT '================================================================================';
+PRINT '';
+
+-- Update an employee's salary
+OPEN SYMMETRIC KEY EmployeeKey
+    DECRYPTION BY CERTIFICATE EmployeeCert;
+GO
+
+-- Update Jane Smith's salary
+UPDATE dbo.Employees
+SET Salary_Encrypted = EncryptByKey(Key_GUID('EmployeeKey'), '98000')
+WHERE FirstName = 'Jane' AND LastName = 'Smith';
+GO
+
+PRINT 'Salary updated for Jane Smith.';
+PRINT '';
+
+-- View the updated data
+SELECT EmployeeID,
+       FirstName,
+       LastName,
+       CONVERT(DECIMAL(18,2), CONVERT(VARCHAR(20), DecryptByKey(Salary_Encrypted))) AS Salary
+FROM dbo.Employees
+WHERE FirstName = 'Jane' AND LastName = 'Smith';
+GO
+
+CLOSE SYMMETRIC KEY EmployeeKey;
+GO
+
+PRINT '';
+PRINT '================================================================================';
+PRINT 'Step 10: Search Encrypted Data (Important Consideration)';
+PRINT '================================================================================';
+PRINT '';
+
+-- Searching encrypted data requires decrypting each row
+-- This can be expensive for large tables
+OPEN SYMMETRIC KEY EmployeeKey
+    DECRYPTION BY CERTIFICATE EmployeeCert;
+GO
+
+PRINT 'Finding employees with SSN starting with "123":';
+PRINT '';
+
+SELECT EmployeeID,
+       FirstName,
+       LastName,
+       CONVERT(VARCHAR(11), DecryptByKey(SSN_Encrypted)) AS SSN
+FROM dbo.Employees
+WHERE CONVERT(VARCHAR(11), DecryptByKey(SSN_Encrypted)) LIKE '123%';
+GO
+
+CLOSE SYMMETRIC KEY EmployeeKey;
+GO
+
+PRINT '';
+PRINT '================================================================================';
+PRINT 'Step 11: Create Stored Procedure for Secure Data Access';
+PRINT '================================================================================';
+PRINT '';
+GO
+
+-- Create a stored procedure that encapsulates encryption logic
+CREATE PROCEDURE dbo.usp_GetEmployeeDetails
+    @EmployeeID INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    
+    -- Open the symmetric key
+    OPEN SYMMETRIC KEY EmployeeKey
+        DECRYPTION BY CERTIFICATE EmployeeCert;
+    
+    -- Return decrypted data
+    SELECT EmployeeID,
+           FirstName,
+           LastName,
+           CONVERT(VARCHAR(11), DecryptByKey(SSN_Encrypted)) AS SSN,
+           CONVERT(DECIMAL(18,2), CONVERT(VARCHAR(20), DecryptByKey(Salary_Encrypted))) AS Salary,
+           CONVERT(VARCHAR(100), DecryptByKey(Email_Encrypted)) AS Email,
+           CreatedDate
+    FROM dbo.Employees
+    WHERE EmployeeID = @EmployeeID;
+    
+    -- Close the symmetric key
+    CLOSE SYMMETRIC KEY EmployeeKey;
+END
+GO
+
+PRINT 'Stored procedure created successfully.';
+PRINT '';
+
+-- Test the stored procedure
+EXEC dbo.usp_GetEmployeeDetails @EmployeeID = 1;
+GO
+
+PRINT '';
+PRINT '================================================================================';
+PRINT 'Step 12: Best Practices and Security Considerations';
+PRINT '================================================================================';
+PRINT '';
+
+PRINT 'BEST PRACTICES:';
+PRINT '1. BACKUP YOUR CERTIFICATES AND KEYS!';
+PRINT '   Use: BACKUP CERTIFICATE EmployeeCert TO FILE = ''path\certificate.cer''';
+PRINT '        WITH PRIVATE KEY (FILE = ''path\private_key.pvk'',';
+PRINT '        ENCRYPTION BY PASSWORD = ''BackupPassword'')';
+PRINT '';
+PRINT '2. Use strong passwords for the database master key';
+PRINT '';
+PRINT '3. Close symmetric keys when not in use to minimize exposure';
+PRINT '';
+PRINT '4. Consider performance impact - decryption happens at query time';
+PRINT '';
+PRINT '5. Grant minimal permissions:';
+PRINT '   - Users need VIEW DEFINITION on certificate';
+PRINT '   - Users need CONTROL permission on symmetric key';
+PRINT '';
+PRINT '6. Encrypted columns cannot be indexed or used in computed columns';
+PRINT '';
+PRINT '7. Consider using Always Encrypted for client-side encryption';
+PRINT '   if you need to protect data from DBAs';
+PRINT '';
+
+PRINT '================================================================================';
+PRINT 'Step 13: Verify Encryption Hierarchy';
+PRINT '================================================================================';
+PRINT '';
+
+-- Check the encryption hierarchy
+SELECT 
+    'Database Master Key' AS Level,
+    name,
+    create_date,
+    modify_date
+FROM sys.symmetric_keys
+WHERE name = '##MS_DatabaseMasterKey##'
+
+UNION ALL
+
+SELECT 
+    'Certificate' AS Level,
+    name,
+    CONVERT(VARCHAR(30), start_date, 120) AS create_date,
+    CONVERT(VARCHAR(30), expiry_date, 120) AS modify_date
+FROM sys.certificates
+WHERE name = 'EmployeeCert'
+
+UNION ALL
+
+SELECT 
+    'Symmetric Key' AS Level,
+    name,
+    CONVERT(VARCHAR(30), create_date, 120) AS create_date,
+    NULL AS modify_date
+FROM sys.symmetric_keys
+WHERE name = 'EmployeeKey';
+GO
+
+PRINT '';
+PRINT '================================================================================';
+PRINT 'Demo Complete!';
+PRINT '================================================================================';
+PRINT '';
+PRINT 'To clean up:';
+PRINT 'USE master;';
+PRINT 'DROP DATABASE EncryptionDemo;';
+PRINT '';
+PRINT 'For more information:';
+PRINT 'https://learn.microsoft.com/en-us/sql/relational-databases/security/encryption/';
+GO
